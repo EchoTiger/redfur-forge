@@ -562,6 +562,15 @@ class PipelineOrchestrator(
             cleared += directorySizeBytes(dir)
             dir.deleteRecursively()
         }
+        val updatesDir = File(appContext.cacheDir, "updates")
+        if (updatesDir.exists()) {
+            updatesDir.listFiles()?.forEach { file ->
+                if (file.isFile && !file.name.endsWith(".part")) {
+                    val len = file.length()
+                    if (file.delete()) cleared += len
+                }
+            }
+        }
         cleared += clipboardExportManager.clipboardCacheSizeBytes()
         clipboardExportManager.clearClipboardStaging()
         return cleared
@@ -571,6 +580,7 @@ class PipelineOrchestrator(
         return directorySizeBytes(exportsDir) +
             directorySizeBytes(jobsWorkRoot) +
             directorySizeBytes(File(appContext.cacheDir, "probe_staging")) +
+            directorySizeBytes(File(appContext.cacheDir, "updates")) +
             clipboardExportManager.clipboardCacheSizeBytes()
     }
 

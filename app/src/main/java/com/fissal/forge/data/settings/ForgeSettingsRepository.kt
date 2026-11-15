@@ -38,7 +38,10 @@ data class ForgeSettings(
     val autoCopyOnShareEdit: Boolean = false,
     val maxConcurrentDownloads: Int = 3,
     val computeSlotsOverride: Int = 0, // 0 = auto from device RAM
-    val filenameSuffix: String = "_forge"
+    val filenameSuffix: String = "_forge",
+    val autoCheckAppUpdates: Boolean = true,
+    val autoDownloadAppUpdates: Boolean = false,
+    val dismissedUpdateTag: String = ""
 )
 
 class ForgeSettingsRepository(private val appContext: Context) {
@@ -72,7 +75,10 @@ class ForgeSettingsRepository(private val appContext: Context) {
             autoCopyOnShareEdit = prefs[KEY_AUTO_COPY_SHARE] ?: false,
             maxConcurrentDownloads = (prefs[KEY_MAX_DOWNLOADS] ?: 3).coerceIn(1, 5),
             computeSlotsOverride = (prefs[KEY_COMPUTE_SLOTS] ?: 0).coerceIn(0, 4),
-            filenameSuffix = prefs[KEY_SUFFIX] ?: "_forge"
+            filenameSuffix = prefs[KEY_SUFFIX] ?: "_forge",
+            autoCheckAppUpdates = prefs[KEY_AUTO_CHECK_UPDATES] ?: true,
+            autoDownloadAppUpdates = prefs[KEY_AUTO_DOWNLOAD_UPDATES] ?: false,
+            dismissedUpdateTag = prefs[KEY_DISMISSED_UPDATE_TAG].orEmpty()
         )
     }
 
@@ -106,7 +112,10 @@ class ForgeSettingsRepository(private val appContext: Context) {
                 autoCopyOnShareEdit = prefs[KEY_AUTO_COPY_SHARE] ?: false,
                 maxConcurrentDownloads = (prefs[KEY_MAX_DOWNLOADS] ?: 3).coerceIn(1, 5),
                 computeSlotsOverride = (prefs[KEY_COMPUTE_SLOTS] ?: 0).coerceIn(0, 4),
-                filenameSuffix = prefs[KEY_SUFFIX] ?: "_forge"
+                filenameSuffix = prefs[KEY_SUFFIX] ?: "_forge",
+                autoCheckAppUpdates = prefs[KEY_AUTO_CHECK_UPDATES] ?: true,
+                autoDownloadAppUpdates = prefs[KEY_AUTO_DOWNLOAD_UPDATES] ?: false,
+                dismissedUpdateTag = prefs[KEY_DISMISSED_UPDATE_TAG].orEmpty()
             )
             val next = transform(current)
             prefs[KEY_DOWNLOAD_MODE] = next.defaultDownloadMode.name
@@ -131,6 +140,9 @@ class ForgeSettingsRepository(private val appContext: Context) {
             prefs[KEY_MAX_DOWNLOADS] = next.maxConcurrentDownloads.coerceIn(1, 5)
             prefs[KEY_COMPUTE_SLOTS] = next.computeSlotsOverride.coerceIn(0, 4)
             prefs[KEY_SUFFIX] = next.filenameSuffix
+            prefs[KEY_AUTO_CHECK_UPDATES] = next.autoCheckAppUpdates
+            prefs[KEY_AUTO_DOWNLOAD_UPDATES] = next.autoDownloadAppUpdates
+            prefs[KEY_DISMISSED_UPDATE_TAG] = next.dismissedUpdateTag
         }
     }
 
@@ -157,5 +169,8 @@ class ForgeSettingsRepository(private val appContext: Context) {
         private val KEY_MAX_DOWNLOADS = intPreferencesKey("max_downloads")
         private val KEY_COMPUTE_SLOTS = intPreferencesKey("compute_slots")
         private val KEY_SUFFIX = stringPreferencesKey("filename_suffix")
+        private val KEY_AUTO_CHECK_UPDATES = booleanPreferencesKey("auto_check_app_updates")
+        private val KEY_AUTO_DOWNLOAD_UPDATES = booleanPreferencesKey("auto_download_app_updates")
+        private val KEY_DISMISSED_UPDATE_TAG = stringPreferencesKey("dismissed_update_tag")
     }
 }

@@ -1,5 +1,7 @@
 package com.fissal.forge.ui.screens
 
+import android.content.Intent
+import android.net.Uri
 import androidx.compose.foundation.BorderStroke
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Column
@@ -10,6 +12,7 @@ import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
+import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
@@ -22,26 +25,40 @@ import androidx.compose.material3.Card
 import androidx.compose.material3.CardDefaults
 import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.FilterChip
+import androidx.compose.material3.LinearProgressIndicator
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Slider
+import androidx.compose.material3.Surface
 import androidx.compose.material3.Switch
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.draw.clip
+import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import com.fissal.forge.data.settings.ForgeSettings
 import com.fissal.forge.domain.model.AspectPreset
 import com.fissal.forge.domain.model.DownloadMode
 import com.fissal.forge.domain.model.VideoCodecChoice
+import com.fissal.forge.ui.theme.AmberActive
+import com.fissal.forge.ui.theme.CoralError
 import com.fissal.forge.ui.theme.CrispWhite
+import com.fissal.forge.ui.theme.EmeraldSuccess
 import com.fissal.forge.ui.theme.MasserCrimson
 import com.fissal.forge.ui.theme.MutedSteel
 import com.fissal.forge.ui.theme.SecundaSilver
+import com.fissal.forge.ui.theme.SlateCard
 import com.fissal.forge.ui.theme.SlateOutline
 import com.fissal.forge.ui.theme.SlateSurface
+import com.fissal.forge.update.AppUpdateManager
+import com.fissal.forge.update.AppUpdatePhase
+import com.fissal.forge.update.AppUpdateState
+import java.util.Locale
 import kotlin.math.roundToInt
 
 @OptIn(ExperimentalLayoutApi::class)
@@ -51,11 +68,18 @@ fun SettingsScreen(
     ytDlpVersion: String,
     isUpdatingYtDlp: Boolean,
     cacheSizeBytes: Long,
+    appUpdateState: AppUpdateState,
+    onCheckAppUpdate: () -> Unit,
+    onStartAppUpdate: () -> Unit,
+    onCancelAppUpdate: () -> Unit,
+    onInstallAppUpdate: () -> Unit,
     onUpdateSettings: ((ForgeSettings) -> ForgeSettings) -> Unit,
     onUpdateYtDlp: (nightly: Boolean) -> Unit,
     onClearCache: () -> Unit,
     modifier: Modifier = Modifier
 ) {
+    val context = LocalContext.current
+
     Column(
         modifier = modifier
             .fillMaxSize()
@@ -63,6 +87,190 @@ fun SettingsScreen(
             .padding(horizontal = 16.dp, vertical = 12.dp),
         verticalArrangement = Arrangement.spacedBy(14.dp)
     ) {
+        // GitHub Release App Auto-Updater
+        SettingsCard(title = "App Updates (GitHub Releases)") {
+            val release = appUpdateState.release
+            val statusColor: Color
+            val statusText: String
+            when (appUpdateState.phase) {
+                AppUpdatePhase.CHECKING -> {
+                    statusColor = AmberActive
+                    statusText = "Checking GitHub Releases..."
+                }
+                AppUpdatePhase.UP_TO_DATE -> {
+                    statusColor = EmeraldSuccess
+                    statusText = "Up to date (v${appUpdateState.currentVersion})"
+                }
+                AppUpdatePhase.AVAILABLE -> {
+                    statusColor = MasserCrimson
+                    statusText = "Update available: ${release?.tagName ?: ""}"
+                }
+                AppUpdatePhase.DOWNLOADING -> {
+                    statusColor = AmberActive
+                    val dlMb = appUpdateState.downloadedBytes / (1024.0 * 1024.0)
+                    val totMb = appUpdateState.totalBytes / (1024.0 * 1024.0)
+                    statusText = if (appUpdateState.totalBytes > 0L) {
+                        String.format(Locale.US, "Downloading %s: %.1f / %.1f MB", release?.tagName ?: "", dlMb, totMb)
+                    } else {
+                        String.format(Locale.US, "Downloading %s: %.1f MB", release?.tagName ?: "", dlMb)
+                    }
+                }
+                AppUpdatePhase.READY_TO_INSTALL -> {
+                    statusColor = EmeraldSuccess
+                    statusText = "Verified & ready to install (${release?.tagName ?: ""})"
+                }
+                AppUpdatePhase.NEEDS_INSTALL_PERMISSION -> {
+                    statusColor = AmberActive
+                    statusText = "Grant app install permission to apply ${release?.tagName ?: ""}"
+                }
+                AppUpdatePhase.ERROR -> {
+                    statusColor = CoralError
+                    statusText = appUpdateState.errorMessage ?: "Update check failed"
+                }
+                AppUpdatePhase.IDLE -> {
+                    statusColor = SecundaSilver
+                    statusText = "Installed: v${appUpdateState.currentVersion}"
+                }
+            }
+
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.SpaceBetween,
+                verticalAlignment = Alignment.CenterVertically
+            ) {
+                Text(
+                    text = "Installed: v${appUpdateState.currentVersion}",
+                    style = MaterialTheme.typography.bodyMedium,
+                    color = CrispWhite
+                )
+                Surface(
+                    color = statusColor.copy(alpha = 0.16f),
+                    shape = RoundedCornerShape(8.dp)
+                ) {
+                    Text(
+                        text = if (appUpdateState.phase == AppUpdatePhase.IDLE) "GitHub Sync" else appUpdateState.phase.name.replace('_', ' '),
+                        style = MaterialTheme.typography.labelSmall,
+                        color = statusColor,
+                        modifier = Modifier.padding(horizontal = 8.dp, vertical = 3.dp)
+                    )
+                }
+            }
+
+            Text(
+                text = statusText,
+                style = MaterialTheme.typography.bodySmall,
+                color = statusColor
+            )
+
+            if (appUpdateState.phase == AppUpdatePhase.DOWNLOADING) {
+                LinearProgressIndicator(
+                    progress = { appUpdateState.progress.coerceIn(0f, 1f) },
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .height(5.dp)
+                        .clip(RoundedCornerShape(3.dp)),
+                    color = MasserCrimson,
+                    trackColor = SlateCard
+                )
+            }
+
+            if (release != null && release.releaseNotes.isNotBlank() &&
+                (appUpdateState.phase == AppUpdatePhase.AVAILABLE ||
+                    appUpdateState.phase == AppUpdatePhase.DOWNLOADING ||
+                    appUpdateState.phase == AppUpdatePhase.READY_TO_INSTALL ||
+                    appUpdateState.phase == AppUpdatePhase.NEEDS_INSTALL_PERMISSION)
+            ) {
+                Text(
+                    text = release.releaseNotes.trim(),
+                    style = MaterialTheme.typography.labelSmall,
+                    color = MutedSteel,
+                    maxLines = 4,
+                    overflow = TextOverflow.Ellipsis
+                )
+            }
+
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.spacedBy(10.dp)
+            ) {
+                OutlinedButton(
+                    onClick = onCheckAppUpdate,
+                    enabled = appUpdateState.phase != AppUpdatePhase.CHECKING &&
+                        appUpdateState.phase != AppUpdatePhase.DOWNLOADING,
+                    shape = RoundedCornerShape(10.dp),
+                    modifier = Modifier.weight(1f)
+                ) {
+                    if (appUpdateState.phase == AppUpdatePhase.CHECKING) {
+                        CircularProgressIndicator(modifier = Modifier.size(16.dp), strokeWidth = 2.dp, color = SecundaSilver)
+                        Spacer(Modifier.width(6.dp))
+                    }
+                    Text("Check Now")
+                }
+
+                when (appUpdateState.phase) {
+                    AppUpdatePhase.AVAILABLE -> {
+                        Button(
+                            onClick = onStartAppUpdate,
+                            colors = ButtonDefaults.buttonColors(containerColor = MasserCrimson),
+                            shape = RoundedCornerShape(10.dp),
+                            modifier = Modifier.weight(1f)
+                        ) {
+                            Text("Update ${release?.tagName ?: ""}", maxLines = 1)
+                        }
+                    }
+                    AppUpdatePhase.DOWNLOADING -> {
+                        OutlinedButton(
+                            onClick = onCancelAppUpdate,
+                            shape = RoundedCornerShape(10.dp),
+                            modifier = Modifier.weight(1f)
+                        ) {
+                            Text("Cancel", color = CoralError)
+                        }
+                    }
+                    AppUpdatePhase.READY_TO_INSTALL, AppUpdatePhase.NEEDS_INSTALL_PERMISSION -> {
+                        Button(
+                            onClick = onInstallAppUpdate,
+                            colors = ButtonDefaults.buttonColors(containerColor = EmeraldSuccess, contentColor = CrispWhite),
+                            shape = RoundedCornerShape(10.dp),
+                            modifier = Modifier.weight(1f)
+                        ) {
+                            Text(
+                                if (appUpdateState.phase == AppUpdatePhase.NEEDS_INSTALL_PERMISSION) "Allow & Install"
+                                else "Install ${release?.tagName ?: ""}",
+                                maxLines = 1
+                            )
+                        }
+                    }
+                    else -> {
+                        OutlinedButton(
+                            onClick = {
+                                val targetUrl = release?.htmlUrl?.ifBlank { null } ?: AppUpdateManager.RELEASES_WEB_URL
+                                context.startActivity(Intent(Intent.ACTION_VIEW, Uri.parse(targetUrl)))
+                            },
+                            shape = RoundedCornerShape(10.dp),
+                            modifier = Modifier.weight(1f)
+                        ) {
+                            Text("Releases", maxLines = 1)
+                        }
+                    }
+                }
+            }
+
+            SettingsSwitchRow(
+                title = "Auto-check GitHub Releases on launch",
+                subtitle = "Checks EchoTiger/redfur-forge for newer signed APKs at startup",
+                checked = settings.autoCheckAppUpdates,
+                onCheckedChange = { v -> onUpdateSettings { it.copy(autoCheckAppUpdates = v) } }
+            )
+
+            SettingsSwitchRow(
+                title = "Auto-download updates in background",
+                subtitle = "Stages verified matching-ABI APK automatically when a new release lands",
+                checked = settings.autoDownloadAppUpdates,
+                onCheckedChange = { v -> onUpdateSettings { it.copy(autoDownloadAppUpdates = v) } }
+            )
+        }
+
         // Downloader Defaults
         SettingsCard(title = "Downloader Defaults") {
             Text("Default Download Mode", style = MaterialTheme.typography.labelMedium, color = SecundaSilver)

@@ -38,6 +38,8 @@ import com.fissal.forge.domain.model.ResolvedUrlMetadata
 import com.fissal.forge.domain.model.TrimSpec
 import com.fissal.forge.domain.model.VideoCodecChoice
 import com.fissal.forge.pipeline.OrchestratorMetrics
+import com.fissal.forge.update.AppUpdateManager
+import com.fissal.forge.update.AppUpdateState
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
@@ -45,6 +47,7 @@ import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.SharingStarted
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
+import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.flow.stateIn
 import kotlinx.coroutines.flow.update
 import kotlinx.coroutines.launch
@@ -153,6 +156,7 @@ class ForgeViewModel(application: Application) : AndroidViewModel(application) {
     private val imageRawEngine = app.imageRawEngine
     private val ytDlpEngine = app.ytDlpEngine
     private val binaryManager = app.binaryManager
+    private val appUpdateManager = app.appUpdateManager
 
     val settings: StateFlow<ForgeSettings> = settingsRepo.settingsFlow
         .stateIn(viewModelScope, SharingStarted.Eagerly, ForgeSettings())
@@ -161,6 +165,20 @@ class ForgeViewModel(application: Application) : AndroidViewModel(application) {
         .stateIn(viewModelScope, SharingStarted.Eagerly, emptyList())
 
     val metrics: StateFlow<OrchestratorMetrics> = orchestrator.metrics
+
+    val appUpdateState: StateFlow<AppUpdateState> = appUpdateManager.state
+
+    init {
+        viewModelScope.launch {
+            val initial = settingsRepo.settingsFlow.first()
+            if (initial.autoCheckAppUpdates) {
+                appUpdateManager.checkForUpdates(
+                    autoDownload = initial.autoDownloadAppUpdates,
+                    userInitiated = false
+                )
+            }
+        }
+    }
 
     private val _selectedTab = MutableStateFlow(MainTab.FORGE)
     val selectedTab: StateFlow<MainTab> = _selectedTab.asStateFlow()
@@ -963,10 +981,40 @@ class ForgeViewModel(application: Application) : AndroidViewModel(application) {
 
     fun clearCache() {
         viewModelScope.launch(Dispatchers.IO) {
-            val freed = orchestrator.clearAllCaches()
+            val freedUpdates = appUpdateManager.clearCachedApks()
+            val freed = freedUpdates + orchestrator.clearAllCaches()
             _cacheSizeBytes.value = orchestrator.totalCacheBytes()
             val mb = freed / (1024.0 * 1024.0)
             showBanner(String.format("Cleared %.1f MB of staging & export cache", mb))
+        }
+    }
+
+    fun checkForAppUpdates() {
+        appUpdateManager.checkForUpdates(
+            autoDownload = settings.value.autoDownloadAppUpdates,
+            userInitiated = true
+        )
+    }
+
+    fun startAppUpdate(autoInstallAfter: Boolean = true) {
+        appUpdateManager.downloadUpdate(autoInstallAfter)
+    }
+
+    fun cancelAppUpdate() {
+        appUpdateManager.cancelDownload()
+    }
+
+    fun prepareAppUpdateInstall(): AppUpdateManager.InstallAction {
+        return appUpdateManager.prepareInstallIntent()
+    }
+
+    fun consumeAutoInstallFlag() {
+        appUpdateManager.consumeAutoInstallFlag()
+    }
+
+    fun dismissUpdateBanner(tagName: String) {
+        viewModelScope.launch {
+            settingsRepo.update { it.copy(dismissedUpdateTag = tagName) }
         }
     }
 }

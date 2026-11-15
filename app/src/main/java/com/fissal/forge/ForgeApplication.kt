@@ -11,6 +11,7 @@ import com.fissal.forge.engine.MediaProbeEngine
 import com.fissal.forge.engine.NativeBinaryManager
 import com.fissal.forge.engine.YtDlpEngine
 import com.fissal.forge.pipeline.PipelineOrchestrator
+import com.fissal.forge.update.AppUpdateManager
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
@@ -38,6 +39,8 @@ class ForgeApplication : Application() {
         private set
     lateinit var clipboardExportManager: ClipboardExportManager
         private set
+    lateinit var appUpdateManager: AppUpdateManager
+        private set
     lateinit var orchestrator: PipelineOrchestrator
         private set
 
@@ -52,6 +55,7 @@ class ForgeApplication : Application() {
         ytDlpEngine = YtDlpEngine(binaryManager)
         mediaStoreExporter = MediaStoreExporter(this)
         clipboardExportManager = ClipboardExportManager(this)
+        appUpdateManager = AppUpdateManager(this)
 
         orchestrator = PipelineOrchestrator(
             appContext = this,

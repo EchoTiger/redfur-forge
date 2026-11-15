@@ -8,6 +8,7 @@ Native Android Kotlin + Jetpack Compose media utility wrapping **yt-dlp**, **FFm
 - **Perceptual SVT-AV1 + Opus Target-Filesize Engine**: Automatically computes packet/container-aware bitrates, Lanczos scaling, adaptive FPS stepping, and gentle temporal denoising (`hqdn3d`) using `libsvtav1` + `libopus` (or 2-pass `libx265` / `libx264`) so even extreme targets like a **30-minute video under 25 MB** fit cleanly with minimal quality loss.
 - **Bulk Site & File-Type Propagation**: Apply settings from any link chip or batch Studio item across **All `<Audio/Video/...>`**, **This Site (`<host>`)**, or **All Links**, while keeping individual overrides intact.
 - **Workflow Pipeline Dashboard**: Visualizes the 3-stage pipeline (`Resolve` -> `Fetch` -> `Forge`) with live network/compute gauges and active playlist monitoring alongside the local/RAW studio, canonical 16:9 / 4:3 crop snapping, and zero-directory clipboard export.
+- **Automatic GitHub Release Self-Updater**: Checks public GitHub Releases on `EchoTiger/redfur-forge` at launch (or manually in Settings), picks the matching device ABI APK (`arm64-v8a` / `universal`), verifies its SHA-256 checksum against release notes, and hands off seamlessly to Android `PackageInstaller`.
 
 ## Build, Release Signing & ABI Splits
 ```bash

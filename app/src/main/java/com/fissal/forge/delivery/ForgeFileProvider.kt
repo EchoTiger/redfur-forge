@@ -30,6 +30,7 @@ class ForgeFileProvider : FileProvider() {
             "opus", "ogg" -> "audio/ogg"
             "flac" -> "audio/flac"
             "wav" -> "audio/wav"
+            "apk" -> "application/vnd.android.package-archive"
             else -> super.getType(uri)
         }
     }
