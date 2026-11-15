@@ -288,10 +288,10 @@ class ImageRawEngine(private val appContext: Context) {
         var working = bitmap
         var createdCopy = false
         try {
-            // Try binary search over quality 94..35 on current dimensions first
-            repeat(4) {
-                var low = 35
-                var high = 94
+            // Finer resolution stepping (0.88x) + broader quality binary search (16..96) preserves maximum sharpness under target cap
+            repeat(6) {
+                var low = 16
+                var high = 96
                 var bestBytes: ByteArray? = null
 
                 while (low <= high) {
@@ -315,9 +315,9 @@ class ImageRawEngine(private val appContext: Context) {
                     return
                 }
 
-                // Still over budget at Q35 -> step down resolution by 0.80x
-                val nextW = (working.width * 0.80f).roundToInt().coerceAtLeast(160)
-                val nextH = (working.height * 0.80f).roundToInt().coerceAtLeast(160)
+                // Still over budget at Q16 -> step down resolution smoothly by 0.88x
+                val nextW = (working.width * 0.88f).roundToInt().coerceAtLeast(160)
+                val nextH = (working.height * 0.88f).roundToInt().coerceAtLeast(160)
                 val scaled = Bitmap.createScaledBitmap(working, nextW, nextH, true)
                 if (createdCopy && working !== bitmap && !working.isRecycled) {
                     working.recycle()
@@ -326,9 +326,9 @@ class ImageRawEngine(private val appContext: Context) {
                 createdCopy = true
             }
 
-            // Final fallback write at Q35 after downscaling
+            // Final fallback write at Q24 after smooth downscaling
             FileOutputStream(outputFile).use { fos ->
-                working.compress(format, 35, fos)
+                working.compress(format, 24, fos)
                 fos.flush()
             }
         } finally {

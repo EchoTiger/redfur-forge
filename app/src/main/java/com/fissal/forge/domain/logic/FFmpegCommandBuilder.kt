@@ -2,6 +2,7 @@ package com.fissal.forge.domain.logic
 
 import com.fissal.forge.domain.model.AudioCodecChoice
 import com.fissal.forge.domain.model.CompressMode
+import com.fissal.forge.domain.model.CompressionTier
 import com.fissal.forge.domain.model.MediaKind
 import com.fissal.forge.domain.model.MediaProbeResult
 import com.fissal.forge.domain.model.PipelineSpec
@@ -9,12 +10,59 @@ import com.fissal.forge.domain.model.VideoCodecChoice
 import java.util.Locale
 import kotlin.math.min
 
+enum class EncodePassMode {
+    SINGLE,
+    PASS_1,
+    PASS_2
+}
+
 /**
  * Builds deterministic CLI argument lists for libffmpeg.so.
+ * Supports single-pass perceptual SVT-AV1 + Opus, true 2-pass HEVC/H.264/VP9,
+ * Lanczos scaling, adaptive FPS stepping, gentle temporal denoising, and clean stream copies.
  */
 object FFmpegCommandBuilder {
 
     private val AUDIO_ONLY_EXTENSIONS = setOf("mp3", "m4a", "opus", "ogg", "flac", "wav")
+
+    fun resolveEffectiveVideoCodec(probe: MediaProbeResult, spec: PipelineSpec): VideoCodecChoice {
+        val targetExt = (spec.convert?.targetExtension ?: probe.extension).lowercase(Locale.US)
+        val convert = spec.convert
+        val compress = spec.compress
+        return when {
+            targetExt == "gif" -> VideoCodecChoice.COPY
+            targetExt == "webm" -> when {
+                convert?.videoCodec == VideoCodecChoice.AV1 -> VideoCodecChoice.AV1
+                convert == null && compress?.mode == CompressMode.TARGET_BYTES &&
+                    compress.tier == CompressionTier.PERCEPTUAL_AV1 -> VideoCodecChoice.AV1
+                convert == null || convert.videoCodec == VideoCodecChoice.H264 || convert.videoCodec == VideoCodecChoice.HEVC ->
+                    VideoCodecChoice.VP9
+                else -> convert.videoCodec
+            }
+            convert != null -> convert.videoCodec
+            compress?.mode == CompressMode.TARGET_BYTES -> when (compress.tier) {
+                CompressionTier.PERCEPTUAL_AV1 -> VideoCodecChoice.AV1
+                CompressionTier.TWO_PASS_HEVC -> VideoCodecChoice.HEVC
+                CompressionTier.COMPATIBLE_H264 -> VideoCodecChoice.H264
+            }
+            else -> VideoCodecChoice.H264
+        }
+    }
+
+    fun shouldUseTwoPass(probe: MediaProbeResult, spec: PipelineSpec): Boolean {
+        val compress = spec.compress ?: return false
+        if (compress.mode != CompressMode.TARGET_BYTES || !compress.twoPass || compress.targetBytes == null) {
+            return false
+        }
+        val targetExt = (spec.convert?.targetExtension ?: probe.extension).lowercase(Locale.US)
+        if (targetExt in AUDIO_ONLY_EXTENSIONS || targetExt == "gif" || probe.mediaKind == MediaKind.AUDIO) {
+            return false
+        }
+        return when (resolveEffectiveVideoCodec(probe, spec)) {
+            VideoCodecChoice.HEVC, VideoCodecChoice.H264, VideoCodecChoice.VP9 -> true
+            VideoCodecChoice.AV1, VideoCodecChoice.COPY -> false
+        }
+    }
 
     fun buildCommand(
         inputPath: String,
@@ -22,7 +70,10 @@ object FFmpegCommandBuilder {
         probe: MediaProbeResult,
         spec: PipelineSpec,
         threadCount: Int = 4,
-        bitrateMultiplier: Double = 1.0
+        bitrateMultiplier: Double = 1.0,
+        passMode: EncodePassMode = EncodePassMode.SINGLE,
+        passLogPrefix: String? = null,
+        complexityFactor: Double = 1.0
     ): List<String> {
         val trim = spec.trim
         val crop = spec.crop
@@ -103,18 +154,20 @@ object FFmpegCommandBuilder {
         val postCropW = pixelCrop?.width ?: effW
         val postCropH = pixelCrop?.height ?: effH
 
-        val videoCodec = when {
-            targetExt == "gif" -> VideoCodecChoice.COPY // handled via palette filter
-            targetExt == "webm" && (convert == null || convert.videoCodec == VideoCodecChoice.H264 || convert.videoCodec == VideoCodecChoice.HEVC) ->
-                VideoCodecChoice.VP9
-            convert != null -> convert.videoCodec
-            else -> VideoCodecChoice.H264
-        }
+        val videoCodec = resolveEffectiveVideoCodec(probe, spec)
 
         val hasAudio = probe.hasAudio &&
             trim?.muteAudio != true &&
             convert?.audioCodec != AudioCodecChoice.MUTE &&
             targetExt != "gif"
+
+        val preferOpusAudio = targetExt == "webm" ||
+            convert?.audioCodec == AudioCodecChoice.OPUS ||
+            (compress?.mode == CompressMode.TARGET_BYTES &&
+                compress.tier == CompressionTier.PERCEPTUAL_AV1 &&
+                convert?.audioCodec != AudioCodecChoice.AAC &&
+                convert?.audioCodec != AudioCodecChoice.MP3 &&
+                targetExt in setOf("mp4", "mkv", "webm"))
 
         val budgetPlan = if (
             compress?.mode == CompressMode.TARGET_BYTES &&
@@ -128,7 +181,10 @@ object FFmpegCommandBuilder {
                 sourceWidth = postCropW,
                 sourceHeight = postCropH,
                 hasAudio = hasAudio,
-                isHevc = videoCodec == VideoCodecChoice.HEVC
+                isHevc = videoCodec == VideoCodecChoice.HEVC,
+                videoCodec = videoCodec,
+                preferOpusAudio = preferOpusAudio,
+                complexityFactor = complexityFactor
             )
         } else {
             null
@@ -165,10 +221,16 @@ object FFmpegCommandBuilder {
         if (pixelCrop != null) {
             vfParts += "crop=${pixelCrop.width}:${pixelCrop.height}:${pixelCrop.x}:${pixelCrop.y}"
         }
+        if (budgetPlan?.targetFps != null) {
+            vfParts += "fps=${budgetPlan.targetFps}"
+        }
         if (requestedMaxDim != null) {
-            vfParts += "scale='min($requestedMaxDim,iw)':'min($requestedMaxDim,ih)':force_original_aspect_ratio=decrease:force_divisible_by=2"
+            vfParts += "scale='min($requestedMaxDim,iw)':'min($requestedMaxDim,ih)':force_original_aspect_ratio=decrease:force_divisible_by=2:flags=lanczos"
         } else {
-            vfParts += "scale=trunc(iw/2)*2:trunc(ih/2)*2"
+            vfParts += "scale=trunc(iw/2)*2:trunc(ih/2)*2:flags=lanczos"
+        }
+        if (budgetPlan?.enableLightDenoise == true) {
+            vfParts += "hqdn3d=1.2:1.2:2.5:2.5"
         }
         if (trim?.fadeInOut == true) {
             vfParts += "fade=t=in:st=0:d=0.4"
@@ -189,52 +251,106 @@ object FFmpegCommandBuilder {
             args += listOf("-c:v", "copy")
         } else {
             args += listOf("-vf", vfParts.joinToString(","))
+            val crf = (compress?.videoCrf ?: 23).coerceIn(14, 42)
             when (effectiveVideoCodec) {
+                VideoCodecChoice.AV1 -> {
+                    val svtParams = buildString {
+                        append("enable-qm=1:qm-min=0:enable-variance-boost=1:variance-boost-strength=2:enable-overlays=1:fast-decode=1")
+                        if (budgetPlan != null) {
+                            append(":overshoot-pct=10")
+                        }
+                    }
+                    args += listOf(
+                        "-c:v", "libsvtav1",
+                        "-preset", "7",
+                        "-pix_fmt", "yuv420p",
+                        "-g", "240",
+                        "-svtav1-params", svtParams
+                    )
+                    if (budgetPlan != null) {
+                        args += listOf("-b:v", budgetPlan.videoBitrateBps.toString())
+                    } else {
+                        args += listOf("-crf", (crf + 6).coerceIn(18, 48).toString())
+                    }
+                }
                 VideoCodecChoice.H264 -> {
-                    args += listOf("-c:v", "libx264", "-preset", "veryfast", "-pix_fmt", "yuv420p")
+                    val preset = when {
+                        passMode == EncodePassMode.PASS_1 -> "fast"
+                        passMode == EncodePassMode.PASS_2 -> "medium"
+                        else -> "veryfast"
+                    }
+                    args += listOf("-c:v", "libx264", "-preset", preset, "-pix_fmt", "yuv420p", "-x264-params", "aq-mode=3")
+                    if (passMode == EncodePassMode.PASS_2) {
+                        args += listOf("-g", "240")
+                    }
+                    if (passLogPrefix != null && passMode != EncodePassMode.SINGLE) {
+                        args += listOf("-pass", if (passMode == EncodePassMode.PASS_1) "1" else "2", "-passlogfile", passLogPrefix)
+                    }
+                    appendRateControlArgs(args, budgetPlan, crf, vp9Mode = false)
                 }
                 VideoCodecChoice.HEVC -> {
-                    args += listOf("-c:v", "libx265", "-preset", "fast", "-pix_fmt", "yuv420p", "-tag:v", "hvc1")
+                    val preset = if (passMode == EncodePassMode.PASS_2) "medium" else "fast"
+                    val x265Params = mutableListOf("aq-mode=3")
+                    if (passLogPrefix != null && passMode == EncodePassMode.PASS_1) {
+                        x265Params += listOf("pass=1", "no-slow-firstpass=1", "stats=${passLogPrefix}_x265.log")
+                    } else if (passLogPrefix != null && passMode == EncodePassMode.PASS_2) {
+                        x265Params += listOf("pass=2", "stats=${passLogPrefix}_x265.log")
+                    }
+                    args += listOf("-c:v", "libx265", "-preset", preset, "-pix_fmt", "yuv420p")
+                    if (passMode != EncodePassMode.PASS_1) {
+                        args += listOf("-tag:v", "hvc1")
+                    }
+                    args += listOf("-x265-params", x265Params.joinToString(":"))
+                    appendRateControlArgs(args, budgetPlan, crf, vp9Mode = false)
                 }
                 VideoCodecChoice.VP9 -> {
-                    args += listOf("-c:v", "libvpx-vp9", "-row-mt", "1", "-pix_fmt", "yuv420p")
+                    val speed = if (passMode == EncodePassMode.PASS_1) "4" else "2"
+                    args += listOf("-c:v", "libvpx-vp9", "-row-mt", "1", "-speed", speed, "-pix_fmt", "yuv420p")
+                    if (passLogPrefix != null && passMode != EncodePassMode.SINGLE) {
+                        args += listOf("-pass", if (passMode == EncodePassMode.PASS_1) "1" else "2", "-passlogfile", passLogPrefix)
+                    }
+                    appendRateControlArgs(args, budgetPlan, crf, vp9Mode = true)
                 }
                 VideoCodecChoice.COPY -> Unit
             }
+        }
 
-            if (budgetPlan != null) {
-                args += listOf(
-                    "-b:v", budgetPlan.videoBitrateBps.toString(),
-                    "-maxrate", budgetPlan.maxrateBps.toString(),
-                    "-bufsize", budgetPlan.bufsizeBps.toString()
-                )
-            } else {
-                val crf = (compress?.videoCrf ?: 23).coerceIn(14, 42)
-                if (effectiveVideoCodec == VideoCodecChoice.VP9) {
-                    args += listOf("-crf", (crf + 6).coerceAtMost(45).toString(), "-b:v", "0")
-                } else {
-                    args += listOf("-crf", crf.toString())
-                }
-            }
+        if (passMode == EncodePassMode.PASS_1) {
+            args += listOf(
+                "-an",
+                "-threads", threadCount.coerceIn(1, 8).toString(),
+                "-f", "null",
+                "/dev/null"
+            )
+            return args
         }
 
         // Audio encoding
         if (!hasAudio) {
             args += "-an"
         } else {
-            val audioChoice = convert?.audioCodec ?: when (targetExt) {
-                "webm" -> AudioCodecChoice.OPUS
-                "mkv" -> AudioCodecChoice.AAC
+            val audioChoice = when {
+                convert?.audioCodec != null -> convert.audioCodec
+                preferOpusAudio -> AudioCodecChoice.OPUS
+                targetExt == "webm" -> AudioCodecChoice.OPUS
                 else -> AudioCodecChoice.AAC
             }
+            val afParts = mutableListOf<String>()
+            if (audioChoice == AudioCodecChoice.OPUS) {
+                // Resample to 48kHz with highpass via SoX so Opus accepts any phone/web input cleanly
+                afParts += listOf("aresample=48000:resampler=soxr", "highpass=f=35")
+            }
             if (trim?.fadeInOut == true) {
-                val afParts = mutableListOf("afade=t=in:st=0:d=0.4")
+                afParts += "afade=t=in:st=0:d=0.4"
                 if (effectiveDurationMs > 1200L) {
                     val outStart = (effectiveDurationMs / 1000.0) - 0.4
                     afParts += String.format(Locale.US, "afade=t=out:st=%.3f:d=0.4", outStart.coerceAtLeast(0.5))
                 }
+            }
+            if (afParts.isNotEmpty() && audioChoice != AudioCodecChoice.COPY && audioChoice != AudioCodecChoice.MUTE) {
                 args += listOf("-af", afParts.joinToString(","))
             }
+
             val audioBps = budgetPlan?.audioBitrateBps ?: 128_000L
             when (audioChoice) {
                 AudioCodecChoice.COPY -> {
@@ -244,9 +360,24 @@ object FFmpegCommandBuilder {
                         args += listOf("-c:a", "copy")
                     }
                 }
-                AudioCodecChoice.AAC -> args += listOf("-c:a", "aac", "-b:a", audioBps.toString())
-                AudioCodecChoice.MP3 -> args += listOf("-c:a", "libmp3lame", "-b:a", audioBps.toString())
-                AudioCodecChoice.OPUS -> args += listOf("-c:a", "libopus", "-b:a", min(audioBps, 128_000L).toString())
+                AudioCodecChoice.AAC -> {
+                    if (budgetPlan != null) args += listOf("-ac", "2")
+                    args += listOf("-c:a", "aac", "-b:a", audioBps.toString())
+                }
+                AudioCodecChoice.MP3 -> {
+                    if (budgetPlan != null) args += listOf("-ac", "2")
+                    args += listOf("-c:a", "libmp3lame", "-b:a", audioBps.toString())
+                }
+                AudioCodecChoice.OPUS -> {
+                    if (budgetPlan != null) args += listOf("-ac", "2")
+                    args += listOf(
+                        "-c:a", "libopus",
+                        "-b:a", min(audioBps, 128_000L).toString(),
+                        "-vbr", "on",
+                        "-compression_level", "10",
+                        "-frame_duration", "60"
+                    )
+                }
                 AudioCodecChoice.FLAC -> args += listOf("-c:a", "flac")
                 AudioCodecChoice.WAV -> args += listOf("-c:a", "pcm_s16le")
                 AudioCodecChoice.MUTE -> args += "-an"
@@ -263,6 +394,25 @@ object FFmpegCommandBuilder {
         return args
     }
 
+    private fun appendRateControlArgs(
+        args: MutableList<String>,
+        budgetPlan: VideoBudgetPlan?,
+        crf: Int,
+        vp9Mode: Boolean
+    ) {
+        if (budgetPlan != null) {
+            args += listOf(
+                "-b:v", budgetPlan.videoBitrateBps.toString(),
+                "-maxrate", budgetPlan.maxrateBps.toString(),
+                "-bufsize", budgetPlan.bufsizeBps.toString()
+            )
+        } else if (vp9Mode) {
+            args += listOf("-crf", (crf + 6).coerceAtMost(45).toString(), "-b:v", "0")
+        } else {
+            args += listOf("-crf", crf.toString())
+        }
+    }
+
     private fun buildAudioOnlyArgs(
         args: MutableList<String>,
         targetExt: String,
@@ -274,12 +424,18 @@ object FFmpegCommandBuilder {
         args += "-vn"
         val compress = spec.compress
         val trim = spec.trim
+        val afParts = mutableListOf<String>()
+        if (targetExt == "opus" || targetExt == "ogg") {
+            afParts += "aresample=48000:resampler=soxr"
+        }
         if (trim?.fadeInOut == true) {
-            val afParts = mutableListOf("afade=t=in:st=0:d=0.4")
+            afParts += "afade=t=in:st=0:d=0.4"
             if (effectiveDurationMs > 1200L) {
                 val outStart = (effectiveDurationMs / 1000.0) - 0.4
                 afParts += String.format(Locale.US, "afade=t=out:st=%.3f:d=0.4", outStart.coerceAtLeast(0.5))
             }
+        }
+        if (afParts.isNotEmpty()) {
             args += listOf("-af", afParts.joinToString(","))
         }
 
@@ -293,7 +449,12 @@ object FFmpegCommandBuilder {
         when (targetExt) {
             "mp3" -> args += listOf("-c:a", "libmp3lame", "-b:a", targetBps.toString())
             "m4a", "aac" -> args += listOf("-c:a", "aac", "-b:a", targetBps.toString())
-            "opus", "ogg" -> args += listOf("-c:a", "libopus", "-b:a", targetBps.coerceAtMost(192_000L).toString())
+            "opus", "ogg" -> args += listOf(
+                "-c:a", "libopus",
+                "-b:a", targetBps.coerceAtMost(192_000L).toString(),
+                "-vbr", "on",
+                "-compression_level", "10"
+            )
             "flac" -> args += listOf("-c:a", "flac")
             "wav" -> args += listOf("-c:a", "pcm_s16le")
             else -> args += listOf("-c:a", "aac", "-b:a", targetBps.toString())

@@ -108,7 +108,12 @@ fun SettingsScreen(
         SettingsCard(title = "Studio, RAW & Crop Defaults") {
             Text("Default Video Codec", style = MaterialTheme.typography.labelMedium, color = SecundaSilver)
             FlowRow(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                listOf(VideoCodecChoice.H264, VideoCodecChoice.HEVC, VideoCodecChoice.VP9).forEach { codec ->
+                listOf(
+                    VideoCodecChoice.AV1,
+                    VideoCodecChoice.HEVC,
+                    VideoCodecChoice.H264,
+                    VideoCodecChoice.VP9
+                ).forEach { codec ->
                     FilterChip(
                         selected = settings.defaultVideoCodec == codec,
                         onClick = { onUpdateSettings { it.copy(defaultVideoCodec = codec) } },

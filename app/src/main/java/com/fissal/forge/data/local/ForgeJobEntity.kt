@@ -37,7 +37,12 @@ data class ForgeJobEntity(
     val outputMimeType: String? = null,
     val errorMessage: String? = null,
     val createdAtMs: Long = System.currentTimeMillis(),
-    val updatedAtMs: Long = System.currentTimeMillis()
+    val updatedAtMs: Long = System.currentTimeMillis(),
+    val groupId: String? = null,
+    val groupTitle: String? = null,
+    val playlistIndex: Int? = null,
+    val playlistTotal: Int? = null,
+    val thumbnailUrl: String? = null
 ) {
     val statusEnum: JobStatus
         get() = runCatching { JobStatus.valueOf(status) }.getOrDefault(JobStatus.FAILED)

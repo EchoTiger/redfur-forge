@@ -12,9 +12,22 @@ import com.fissal.forge.data.settings.ForgeSettings
 import com.fissal.forge.data.settings.ForgeSettingsRepository
 import com.fissal.forge.delivery.ClipboardExportManager
 import com.fissal.forge.delivery.MediaStoreExporter
+import com.fissal.forge.domain.logic.BitrateBudgetCalculator
+import com.fissal.forge.domain.model.AudioCodecChoice
+import com.fissal.forge.domain.model.CompressMode
+import com.fissal.forge.domain.model.CompressSpec
+import com.fissal.forge.domain.model.CompressionTier
+import com.fissal.forge.domain.model.ConvertSpec
+import com.fissal.forge.domain.model.DeliverySpec
+import com.fissal.forge.domain.model.DetectedLinkKind
+import com.fissal.forge.domain.model.DownloadMode
+import com.fissal.forge.domain.model.DownloadSpec
+import com.fissal.forge.domain.model.LinkItemSettings
 import com.fissal.forge.domain.model.MediaKind
 import com.fissal.forge.domain.model.MediaProbeResult
 import com.fissal.forge.domain.model.PipelineSpec
+import com.fissal.forge.domain.model.ResolvedLinkChipItem
+import com.fissal.forge.domain.model.VideoCodecChoice
 import com.fissal.forge.engine.FFmpegCliEngine
 import com.fissal.forge.engine.ImageRawEngine
 import com.fissal.forge.engine.MediaProbeEngine
@@ -41,6 +54,7 @@ import java.io.IOException
 import java.util.Locale
 import java.util.UUID
 import java.util.concurrent.ConcurrentHashMap
+import kotlin.math.roundToLong
 
 data class OrchestratorMetrics(
     val activeNetworkCount: Int = 0,
@@ -53,7 +67,8 @@ data class OrchestratorMetrics(
 /**
  * Dual-lane resource-weighted pipeline orchestrator.
  * - Network Lane runs concurrent yt-dlp downloads bounded by user settings.
- * - Compute Lane runs RAM-weighted FFmpeg & LibRaw transforms without starving or OOM-crashing.
+ * - Compute Lane runs RAM-weighted FFmpeg (SVT-AV1 / 2-pass HEVC / H.264 / Opus) & LibRaw transforms without OOMs.
+ * - Fans playlists out into individually tracked & controllable song jobs grouped by groupId.
  */
 class PipelineOrchestrator(
     private val appContext: Context,
@@ -124,6 +139,303 @@ class PipelineOrchestrator(
         return ids
     }
 
+    suspend fun enqueueResolvedLinks(
+        chips: List<ResolvedLinkChipItem>,
+        saveToDevice: Boolean,
+        copyToClipboard: Boolean,
+        settings: ForgeSettings
+    ): Int {
+        var totalQueued = 0
+        for (chip in chips) {
+            val wantsPlaylist = !chip.settings.playlistSingleOnly &&
+                (chip.tracks.isNotEmpty() || chip.detectedKind == DetectedLinkKind.PLAYLIST || chip.isPlaylistLikeUrl)
+
+            if (wantsPlaylist && chip.tracks.isNotEmpty()) {
+                val selectedTracks = chip.tracks.filter { it.selected }
+                if (selectedTracks.isEmpty()) continue
+                val groupId = "pl_${UUID.randomUUID()}"
+                val total = selectedTracks.size
+                for ((idx, track) in selectedTracks.withIndex()) {
+                    val useDirectTrackUrl = !track.trackUrl.isNullOrBlank()
+                    val spec = buildSpecFromLinkSettings(
+                        chipUrl = if (useDirectTrackUrl) track.trackUrl!! else chip.cleanUrl,
+                        durationSec = track.durationSec ?: chip.durationSec,
+                        linkSettings = chip.settings,
+                        playlistSingleOnly = useDirectTrackUrl,
+                        playlistItemIndex = if (useDirectTrackUrl) null else track.index,
+                        saveToDevice = saveToDevice,
+                        copyToClipboard = copyToClipboard,
+                        globalSettings = settings
+                    )
+                    val id = UUID.randomUUID().toString()
+                    val entity = ForgeJobEntity(
+                        id = id,
+                        title = track.title,
+                        sourceLabel = "${chip.host.ifBlank { "playlist" }} • Track ${idx + 1}/$total",
+                        sourceUriString = spec.download?.url ?: chip.cleanUrl,
+                        mediaKind = MediaKind.REMOTE_URL.name,
+                        lane = JobLane.NETWORK.name,
+                        status = JobStatus.QUEUED.name,
+                        progress = 0f,
+                        statusText = "Queued • ${spec.summaryLabel()}",
+                        pipelineSpecJson = json.encodeToString(spec),
+                        groupId = groupId,
+                        groupTitle = chip.title,
+                        playlistIndex = idx + 1,
+                        playlistTotal = total,
+                        thumbnailUrl = track.thumbnailUrl ?: chip.thumbnailUrl
+                    )
+                    jobDao.upsert(entity)
+                    launchJobCoroutine(entity, null, spec)
+                    totalQueued++
+                }
+            } else if (wantsPlaylist && chip.tracks.isEmpty()) {
+                // Playlist not yet resolved: reserve a group expander job and fan out tracks once metadata arrives
+                val groupId = "pl_${UUID.randomUUID()}"
+                val expanderId = "${groupId}_expander"
+                val baseSpec = buildSpecFromLinkSettings(
+                    chipUrl = chip.cleanUrl,
+                    durationSec = chip.durationSec,
+                    linkSettings = chip.settings,
+                    playlistSingleOnly = false,
+                    playlistItemIndex = null,
+                    saveToDevice = saveToDevice,
+                    copyToClipboard = copyToClipboard,
+                    globalSettings = settings
+                )
+                val placeholder = ForgeJobEntity(
+                    id = expanderId,
+                    title = "Resolving playlist tracks...",
+                    sourceLabel = "${chip.host} • Fetching tracklist",
+                    sourceUriString = chip.cleanUrl,
+                    mediaKind = MediaKind.REMOTE_URL.name,
+                    lane = JobLane.NETWORK.name,
+                    status = JobStatus.DOWNLOADING.name,
+                    progress = 5f,
+                    statusText = "Fetching playlist tracklist...",
+                    pipelineSpecJson = json.encodeToString(baseSpec),
+                    groupId = groupId,
+                    groupTitle = chip.title,
+                    playlistIndex = 1,
+                    playlistTotal = 1,
+                    thumbnailUrl = chip.thumbnailUrl
+                )
+                jobDao.upsert(placeholder)
+                launchPlaylistExpansionJob(placeholder, chip, saveToDevice, copyToClipboard, settings, groupId)
+                totalQueued++
+            } else {
+                val spec = buildSpecFromLinkSettings(
+                    chipUrl = chip.cleanUrl,
+                    durationSec = chip.durationSec,
+                    linkSettings = chip.settings,
+                    playlistSingleOnly = true,
+                    playlistItemIndex = null,
+                    saveToDevice = saveToDevice,
+                    copyToClipboard = copyToClipboard,
+                    globalSettings = settings
+                )
+                val id = UUID.randomUUID().toString()
+                val entity = ForgeJobEntity(
+                    id = id,
+                    title = chip.title,
+                    sourceLabel = "${chip.host.ifBlank { "web" }} • ${spec.summaryLabel()}",
+                    sourceUriString = chip.cleanUrl,
+                    mediaKind = MediaKind.REMOTE_URL.name,
+                    lane = JobLane.NETWORK.name,
+                    status = JobStatus.QUEUED.name,
+                    progress = 0f,
+                    statusText = "Queued • ${spec.summaryLabel()}",
+                    pipelineSpecJson = json.encodeToString(spec),
+                    thumbnailUrl = chip.thumbnailUrl
+                )
+                jobDao.upsert(entity)
+                launchJobCoroutine(entity, null, spec)
+                totalQueued++
+            }
+        }
+        return totalQueued
+    }
+
+    private fun buildSpecFromLinkSettings(
+        chipUrl: String,
+        durationSec: Long?,
+        linkSettings: LinkItemSettings,
+        playlistSingleOnly: Boolean,
+        playlistItemIndex: Int?,
+        saveToDevice: Boolean,
+        copyToClipboard: Boolean,
+        globalSettings: ForgeSettings
+    ): PipelineSpec {
+        val targetBytes = linkSettings.targetSizeMb?.takeIf { it > 0.0 }?.let {
+            (it * 1024.0 * 1024.0).roundToLong()
+        }
+
+        val compressSpec = if (targetBytes != null) {
+            CompressSpec(
+                mode = CompressMode.TARGET_BYTES,
+                videoCrf = globalSettings.defaultVideoCrf,
+                targetBytes = targetBytes,
+                tier = linkSettings.compressionTier,
+                twoPass = true
+            )
+        } else {
+            null
+        }
+
+        val convertSpec = if (targetBytes != null) {
+            if (linkSettings.mode == DownloadMode.AUDIO_ONLY) {
+                ConvertSpec(
+                    targetExtension = linkSettings.audioFormat,
+                    audioCodec = audioCodecForExtension(linkSettings.audioFormat)
+                )
+            } else {
+                val targetExt = if (linkSettings.mode == DownloadMode.VIDEO_BEST_MKV) "mkv" else "mp4"
+                val vCodec = when (linkSettings.compressionTier) {
+                    CompressionTier.PERCEPTUAL_AV1 -> VideoCodecChoice.AV1
+                    CompressionTier.TWO_PASS_HEVC -> VideoCodecChoice.HEVC
+                    CompressionTier.COMPATIBLE_H264 -> VideoCodecChoice.H264
+                }
+                val aCodec = if (linkSettings.compressionTier == CompressionTier.PERCEPTUAL_AV1) {
+                    AudioCodecChoice.OPUS
+                } else {
+                    AudioCodecChoice.AAC
+                }
+                ConvertSpec(targetExtension = targetExt, videoCodec = vCodec, audioCodec = aCodec)
+            }
+        } else {
+            null
+        }
+
+        // Smart download ceiling: if a tiny target size is requested, avoid fetching wasteful 4K streams
+        val recommendedCap = if (targetBytes != null && linkSettings.mode != DownloadMode.AUDIO_ONLY && durationSec != null && durationSec > 0L) {
+            BitrateBudgetCalculator.calculateVideoBudget(
+                targetBytes = targetBytes,
+                durationMs = durationSec * 1000L,
+                sourceWidth = 1920,
+                sourceHeight = 1080,
+                hasAudio = true,
+                isHevc = linkSettings.compressionTier == CompressionTier.TWO_PASS_HEVC,
+                videoCodec = convertSpec?.videoCodec ?: VideoCodecChoice.AV1,
+                preferOpusAudio = convertSpec?.audioCodec == AudioCodecChoice.OPUS
+            ).recommendedDownloadHeightCap
+        } else {
+            null
+        }
+
+        val effectiveMaxHeight = listOfNotNull(linkSettings.maxHeight, recommendedCap).minOrNull()
+
+        return PipelineSpec(
+            download = DownloadSpec(
+                url = chipUrl,
+                playlistSingleOnly = playlistSingleOnly,
+                playlistItemIndex = playlistItemIndex,
+                mode = linkSettings.mode,
+                maxHeight = effectiveMaxHeight,
+                audioFormat = linkSettings.audioFormat,
+                embedMetadata = linkSettings.embedMetadata,
+                embedThumbnail = globalSettings.embedDownloadThumbnail && linkSettings.embedMetadata,
+                sponsorBlock = linkSettings.sponsorBlock,
+                useAria2c = globalSettings.useAria2c
+            ),
+            convert = convertSpec,
+            compress = compressSpec,
+            delivery = DeliverySpec(
+                saveToDevice = saveToDevice,
+                copyToClipboard = copyToClipboard,
+                stripMetadata = linkSettings.stripMetadata || (globalSettings.stripMetadataOnClipboard && copyToClipboard && !saveToDevice),
+                filenameSuffix = globalSettings.filenameSuffix
+            )
+        )
+    }
+
+    private fun launchPlaylistExpansionJob(
+        placeholder: ForgeJobEntity,
+        chip: ResolvedLinkChipItem,
+        saveToDevice: Boolean,
+        copyToClipboard: Boolean,
+        settings: ForgeSettings,
+        groupId: String
+    ) {
+        val job = scope.launch {
+            try {
+                val meta = ytDlpEngine.resolveMetadata(chip.cleanUrl, placeholder.id)
+                jobDao.deleteById(placeholder.id)
+
+                val tracks = meta.tracks.ifEmpty { emptyList() }
+                if (tracks.isEmpty()) {
+                    val spec = buildSpecFromLinkSettings(
+                        chipUrl = chip.cleanUrl,
+                        durationSec = meta.durationSec ?: chip.durationSec,
+                        linkSettings = chip.settings,
+                        playlistSingleOnly = true,
+                        playlistItemIndex = null,
+                        saveToDevice = saveToDevice,
+                        copyToClipboard = copyToClipboard,
+                        globalSettings = settings
+                    )
+                    val single = placeholder.copy(
+                        id = UUID.randomUUID().toString(),
+                        title = meta.title,
+                        sourceLabel = "${chip.host} • ${spec.summaryLabel()}",
+                        status = JobStatus.QUEUED.name,
+                        progress = 0f,
+                        statusText = "Queued • ${spec.summaryLabel()}",
+                        groupId = null,
+                        groupTitle = null,
+                        playlistIndex = null,
+                        playlistTotal = null,
+                        thumbnailUrl = meta.thumbnailUrl ?: chip.thumbnailUrl
+                    )
+                    jobDao.upsert(single)
+                    launchJobCoroutine(single, null, spec)
+                } else {
+                    val total = tracks.size
+                    for ((idx, track) in tracks.withIndex()) {
+                        val useDirectUrl = !track.trackUrl.isNullOrBlank()
+                        val spec = buildSpecFromLinkSettings(
+                            chipUrl = if (useDirectUrl) track.trackUrl!! else chip.cleanUrl,
+                            durationSec = track.durationSec ?: chip.durationSec,
+                            linkSettings = chip.settings,
+                            playlistSingleOnly = useDirectUrl,
+                            playlistItemIndex = if (useDirectUrl) null else track.index,
+                            saveToDevice = saveToDevice,
+                            copyToClipboard = copyToClipboard,
+                            globalSettings = settings
+                        )
+                        val trackEntity = ForgeJobEntity(
+                            id = UUID.randomUUID().toString(),
+                            title = track.title,
+                            sourceLabel = "${chip.host} • Track ${idx + 1}/$total",
+                            sourceUriString = spec.download?.url ?: chip.cleanUrl,
+                            mediaKind = MediaKind.REMOTE_URL.name,
+                            lane = JobLane.NETWORK.name,
+                            status = JobStatus.QUEUED.name,
+                            progress = 0f,
+                            statusText = "Queued • ${spec.summaryLabel()}",
+                            pipelineSpecJson = json.encodeToString(spec),
+                            groupId = groupId,
+                            groupTitle = meta.title,
+                            playlistIndex = idx + 1,
+                            playlistTotal = total,
+                            thumbnailUrl = track.thumbnailUrl ?: meta.thumbnailUrl ?: chip.thumbnailUrl
+                        )
+                        jobDao.upsert(trackEntity)
+                        launchJobCoroutine(trackEntity, null, spec)
+                    }
+                }
+            } catch (_: CancellationException) {
+                jobDao.markTerminalState(placeholder.id, JobStatus.CANCELED.name, "Canceled", null)
+            } catch (t: Throwable) {
+                jobDao.markTerminalState(placeholder.id, JobStatus.FAILED.name, "Playlist resolve failed", t.message)
+            } finally {
+                activeCoroutines.remove(placeholder.id)
+                refreshMetrics()
+            }
+        }
+        activeCoroutines[placeholder.id] = job
+        refreshMetrics()
+    }
+
     suspend fun enqueueLocalBatch(items: List<Pair<MediaProbeResult, PipelineSpec>>): List<String> {
         val ids = mutableListOf<String>()
         for ((probe, spec) in items) {
@@ -170,6 +482,48 @@ class PipelineOrchestrator(
         }
     }
 
+    suspend fun removeJob(jobId: String) {
+        activeCoroutines.remove(jobId)?.cancel()
+        val job = jobDao.getById(jobId)
+        job?.outputPath?.let { runCatching { File(it).delete() } }
+        runCatching { File(jobsWorkRoot, jobId).deleteRecursively() }
+        jobDao.deleteById(jobId)
+        refreshMetrics()
+    }
+
+    fun cancelPlaylistGroup(groupId: String) {
+        scope.launch {
+            val groupJobs = jobDao.getByGroupId(groupId)
+            for (job in groupJobs) {
+                activeCoroutines.remove(job.id)?.cancel()
+                if (job.isActive) {
+                    jobDao.markTerminalState(job.id, JobStatus.CANCELED.name, "Canceled", null)
+                }
+            }
+            refreshMetrics()
+        }
+    }
+
+    suspend fun removePlaylistGroup(groupId: String) {
+        val groupJobs = jobDao.getByGroupId(groupId)
+        for (job in groupJobs) {
+            activeCoroutines.remove(job.id)?.cancel()
+            job.outputPath?.let { runCatching { File(it).delete() } }
+            runCatching { File(jobsWorkRoot, job.id).deleteRecursively() }
+        }
+        jobDao.deleteByGroupId(groupId)
+        refreshMetrics()
+    }
+
+    suspend fun retryPlaylistGroup(groupId: String) {
+        val groupJobs = jobDao.getByGroupId(groupId)
+        for (job in groupJobs) {
+            if (job.statusEnum == JobStatus.FAILED || job.statusEnum == JobStatus.CANCELED) {
+                retryJob(job.id)
+            }
+        }
+    }
+
     fun cancelAll() {
         val keys = activeCoroutines.keys.toList()
         keys.forEach { key ->
@@ -184,7 +538,6 @@ class PipelineOrchestrator(
 
     suspend fun clearFinishedJobs() {
         jobDao.clearFinishedJobs()
-        // Prune orphan files in exportsDir no longer referenced by remaining jobs
         val activeJobs = jobDao.observeAllJobs().first()
         val keptPaths = activeJobs.mapNotNull { it.outputPath }.toSet()
         exportsDir.listFiles()?.forEach { file ->
@@ -266,7 +619,7 @@ class PipelineOrchestrator(
             refreshMetrics()
             ytDlpEngine.download(entity.id, dlSpec, File(workDir, "dl")) { pct, msg ->
                 scope.launch {
-                    val mappedPct = if (spec.hasTransformStage) pct * 0.6f else pct
+                    val mappedPct = if (spec.hasTransformStage) pct * 0.55f else pct
                     jobDao.updateProgress(entity.id, JobStatus.DOWNLOADING.name, msg, mappedPct, JobLane.NETWORK.name)
                 }
             }
@@ -286,11 +639,11 @@ class PipelineOrchestrator(
                 val weight = computeSlotWeight(probe.mediaKind)
                 val maxCompute = { effectiveMaxComputeSlots() }
                 finalFile = computePool.withSlots(cost = weight, capacityProvider = maxCompute, onPoolChange = { refreshMetrics() }) {
-                    val baseProgress = 60f
+                    val baseProgress = 55f
                     jobDao.updateProgress(
                         entity.id,
                         JobStatus.PROCESSING.name,
-                        "Processing ${downloaded.name}...",
+                        "Perceptual forge: ${downloaded.name}...",
                         baseProgress,
                         JobLane.COMPUTE.name
                     )
@@ -308,7 +661,7 @@ class PipelineOrchestrator(
                                 entity.id,
                                 JobStatus.PROCESSING.name,
                                 msg,
-                                60f + (subPct * 0.38f),
+                                55f + (subPct * 0.43f),
                                 JobLane.COMPUTE.name
                             )
                         }
@@ -475,6 +828,16 @@ class PipelineOrchestrator(
             MediaKind.VIDEO -> if (probe.extension in setOf("mp4", "mkv", "webm", "mov")) probe.extension else "mp4"
             MediaKind.AUDIO -> if (probe.extension in setOf("mp3", "m4a", "opus", "flac", "wav")) probe.extension else "m4a"
             else -> probe.extension.ifBlank { "bin" }
+        }
+    }
+
+    private fun audioCodecForExtension(ext: String): AudioCodecChoice {
+        return when (ext.lowercase(Locale.US)) {
+            "mp3" -> AudioCodecChoice.MP3
+            "opus", "ogg" -> AudioCodecChoice.OPUS
+            "flac" -> AudioCodecChoice.FLAC
+            "wav" -> AudioCodecChoice.WAV
+            else -> AudioCodecChoice.AAC
         }
     }
 

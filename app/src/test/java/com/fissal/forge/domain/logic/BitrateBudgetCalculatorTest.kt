@@ -55,4 +55,43 @@ class BitrateBudgetCalculatorTest {
         assertEquals(480, plan.targetMaxDimension)
         assertTrue(plan.isTightBudgetWarning)
     }
+
+    @Test
+    fun thirtyMinuteVideoUnder25MbUsesAv1AndOpusCleanly() {
+        val targetBytes = 25L * 1024L * 1024L
+        val plan = BitrateBudgetCalculator.calculateVideoBudget(
+            targetBytes = targetBytes,
+            durationMs = 1_800_000L, // 30 minutes
+            sourceWidth = 1920,
+            sourceHeight = 1080,
+            hasAudio = true,
+            isHevc = false,
+            videoCodec = com.fissal.forge.domain.model.VideoCodecChoice.AV1,
+            preferOpusAudio = true
+        )
+        assertTrue(plan.estimatedOutputBytes <= targetBytes)
+        assertTrue(plan.useOpusAudio)
+        assertTrue(plan.audioBitrateBps in 24_000L..48_000L)
+        assertTrue(plan.videoBitrateBps >= 60_000L)
+        assertEquals(480, plan.recommendedDownloadHeightCap)
+        assertTrue(plan.strategySummary.contains("AV1"))
+        assertTrue(plan.strategySummary.contains("Opus"))
+    }
+
+    @Test
+    fun generousBudgetPreservesNativeResolutionAndFps() {
+        val plan = BitrateBudgetCalculator.calculateVideoBudget(
+            targetBytes = 50L * 1024L * 1024L,
+            durationMs = 60_000L,
+            sourceWidth = 1920,
+            sourceHeight = 1080,
+            hasAudio = true,
+            isHevc = false,
+            videoCodec = com.fissal.forge.domain.model.VideoCodecChoice.AV1,
+            preferOpusAudio = true
+        )
+        assertEquals(null, plan.targetMaxDimension)
+        assertEquals(null, plan.targetFps)
+        assertEquals(false, plan.isTightBudgetWarning)
+    }
 }

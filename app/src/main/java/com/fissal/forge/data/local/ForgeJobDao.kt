@@ -15,6 +15,9 @@ interface ForgeJobDao {
     @Query("SELECT * FROM forge_jobs WHERE id = :id")
     suspend fun getById(id: String): ForgeJobEntity?
 
+    @Query("SELECT * FROM forge_jobs WHERE groupId = :groupId ORDER BY playlistIndex ASC, createdAtMs ASC")
+    suspend fun getByGroupId(groupId: String): List<ForgeJobEntity>
+
     @Query("SELECT * FROM forge_jobs WHERE status IN ('QUEUED', 'DOWNLOADING', 'PROCESSING') ORDER BY createdAtMs ASC")
     suspend fun getPendingOrActiveJobs(): List<ForgeJobEntity>
 
@@ -60,4 +63,7 @@ interface ForgeJobDao {
 
     @Query("DELETE FROM forge_jobs WHERE id = :id")
     suspend fun deleteById(id: String)
+
+    @Query("DELETE FROM forge_jobs WHERE groupId = :groupId")
+    suspend fun deleteByGroupId(groupId: String)
 }

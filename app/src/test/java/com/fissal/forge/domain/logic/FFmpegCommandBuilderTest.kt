@@ -75,4 +75,72 @@ class FFmpegCommandBuilderTest {
         assertTrue(cmd[fcIdx + 1].contains("palettegen"))
         assertTrue(cmd[fcIdx + 1].contains("paletteuse"))
     }
+
+    @Test
+    fun perceptualAv1BuildsSvtAv1AndOpusForTightTargetBytes() {
+        val thirtyMin = sampleVideo.copy(durationMs = 1_800_000L)
+        val spec = PipelineSpec(
+            compress = com.fissal.forge.domain.model.CompressSpec(
+                mode = com.fissal.forge.domain.model.CompressMode.TARGET_BYTES,
+                targetBytes = 25L * 1024L * 1024L,
+                tier = com.fissal.forge.domain.model.CompressionTier.PERCEPTUAL_AV1,
+                twoPass = true
+            )
+        )
+        assertTrue(!FFmpegCommandBuilder.shouldUseTwoPass(thirtyMin, spec))
+        val cmd = FFmpegCommandBuilder.buildCommand("/in.mp4", "/out.mp4", thirtyMin, spec)
+        assertTrue(cmd.contains("libsvtav1"))
+        assertTrue(cmd.contains("-svtav1-params"))
+        assertTrue(cmd.contains("libopus"))
+        val afIdx = cmd.indexOf("-af")
+        assertTrue(afIdx >= 0)
+        assertTrue(cmd[afIdx + 1].contains("aresample=48000:resampler=soxr"))
+    }
+
+    @Test
+    fun twoPassHevcAndH264EmitPass1AndPass2Commands() {
+        val specHevc = PipelineSpec(
+            compress = com.fissal.forge.domain.model.CompressSpec(
+                mode = com.fissal.forge.domain.model.CompressMode.TARGET_BYTES,
+                targetBytes = 15L * 1024L * 1024L,
+                tier = com.fissal.forge.domain.model.CompressionTier.TWO_PASS_HEVC,
+                twoPass = true
+            )
+        )
+        assertTrue(FFmpegCommandBuilder.shouldUseTwoPass(sampleVideo, specHevc))
+        val p1 = FFmpegCommandBuilder.buildCommand(
+            "/in.mp4", "/out.mp4", sampleVideo, specHevc,
+            passMode = EncodePassMode.PASS_1, passLogPrefix = "/tmp/p"
+        )
+        val p2 = FFmpegCommandBuilder.buildCommand(
+            "/in.mp4", "/out.mp4", sampleVideo, specHevc,
+            passMode = EncodePassMode.PASS_2, passLogPrefix = "/tmp/p"
+        )
+        assertTrue(p1.contains("-an"))
+        assertTrue(p1.contains("/dev/null"))
+        val p1Idx = p1.indexOf("-x265-params")
+        val p2Idx = p2.indexOf("-x265-params")
+        assertTrue(p1Idx >= 0 && p1[p1Idx + 1].contains("pass=1"))
+        assertTrue(p2Idx >= 0 && p2[p2Idx + 1].contains("pass=2"))
+
+        val specH264 = PipelineSpec(
+            compress = com.fissal.forge.domain.model.CompressSpec(
+                mode = com.fissal.forge.domain.model.CompressMode.TARGET_BYTES,
+                targetBytes = 15L * 1024L * 1024L,
+                tier = com.fissal.forge.domain.model.CompressionTier.COMPATIBLE_H264,
+                twoPass = true
+            )
+        )
+        assertTrue(FFmpegCommandBuilder.shouldUseTwoPass(sampleVideo, specH264))
+        val h1 = FFmpegCommandBuilder.buildCommand(
+            "/in.mp4", "/out.mp4", sampleVideo, specH264,
+            passMode = EncodePassMode.PASS_1, passLogPrefix = "/tmp/h"
+        )
+        val h2 = FFmpegCommandBuilder.buildCommand(
+            "/in.mp4", "/out.mp4", sampleVideo, specH264,
+            passMode = EncodePassMode.PASS_2, passLogPrefix = "/tmp/h"
+        )
+        assertTrue(h1.contains("-pass") && h1.contains("1"))
+        assertTrue(h2.contains("-pass") && h2.contains("2"))
+    }
 }

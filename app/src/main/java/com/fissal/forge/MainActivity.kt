@@ -69,7 +69,7 @@ class MainActivity : ComponentActivity() {
                 val jobs by viewModel.jobs.collectAsState()
                 val metrics by viewModel.metrics.collectAsState()
                 val urlBatchText by viewModel.urlBatchText.collectAsState()
-                val parsedUrls by viewModel.parsedUrls.collectAsState()
+                val resolvedLinks by viewModel.resolvedLinks.collectAsState()
                 val studioSession by viewModel.studioSession.collectAsState()
                 val ytDlpVersion by viewModel.ytDlpVersion.collectAsState()
                 val isUpdatingYtDlp by viewModel.isUpdatingYtDlp.collectAsState()
@@ -124,6 +124,11 @@ class MainActivity : ComponentActivity() {
                         state = currentStudio,
                         jobs = jobs,
                         onUpdate = viewModel::updateStudio,
+                        onSelectTab = viewModel::updateStudioTab,
+                        onClearInlineWatch = viewModel::clearInlineWatchJobs,
+                        onSelectBatchItem = viewModel::selectStudioItem,
+                        onApplySameType = viewModel::applyStudioToSameType,
+                        onApplyAll = viewModel::applyStudioToAll,
                         onSelectCropPreset = viewModel::selectStudioCropPreset,
                         onExecute = viewModel::enqueueStudioSession,
                         onRunInBackground = viewModel::moveInlineStudioToBackground,
@@ -209,14 +214,27 @@ class MainActivity : ComponentActivity() {
                             when (selectedTab) {
                                 MainTab.FORGE -> HubScreen(
                                     urlBatchText = urlBatchText,
-                                    parsedUrls = parsedUrls,
-                                    settings = settings,
+                                    resolvedLinks = resolvedLinks,
+                                    jobs = jobs,
                                     metrics = metrics,
+                                    settings = settings,
                                     onUrlTextChange = viewModel::updateUrlBatchText,
                                     onPasteClick = viewModel::pasteUrlsFromClipboard,
+                                    onToggleChipExpand = viewModel::toggleLinkChipExpanded,
+                                    onRetryResolveLink = viewModel::retryResolveLink,
+                                    onRemoveChip = viewModel::removeResolvedLink,
+                                    onUpdateChipSettings = viewModel::updateLinkChipSettings,
+                                    onTogglePlaylistTrack = viewModel::togglePlaylistTrack,
+                                    onSetAllPlaylistTracks = viewModel::setAllPlaylistTracks,
+                                    onApplyToSameType = viewModel::applySettingsToSameType,
+                                    onApplyToSameSite = viewModel::applySettingsToSameSite,
+                                    onApplyToAllLinks = viewModel::applySettingsToAllLinks,
+                                    onApplyQuickBatchPreset = viewModel::applyQuickBatchPreset,
+                                    onQueueBatch = viewModel::queueResolvedBatch,
                                     onPickFilesClick = { multiFilePicker.launch(arrayOf("*/*")) },
                                     onOpenQueueClick = { viewModel.selectTab(MainTab.QUEUE) },
-                                    onQueueDownloads = viewModel::queueUrlDownloads
+                                    onCancelAll = viewModel::cancelAllJobs,
+                                    onRemovePlaylistGroup = viewModel::removePlaylistGroup
                                 )
                                 MainTab.QUEUE -> QueueScreen(
                                     jobs = jobs,
@@ -225,6 +243,10 @@ class MainActivity : ComponentActivity() {
                                     onShareJob = viewModel::buildShareIntentForJob,
                                     onCancelJob = viewModel::cancelJob,
                                     onRetryJob = viewModel::retryJob,
+                                    onRemoveJob = viewModel::removeJob,
+                                    onCancelPlaylistGroup = viewModel::cancelPlaylistGroup,
+                                    onRemovePlaylistGroup = viewModel::removePlaylistGroup,
+                                    onRetryPlaylistGroup = viewModel::retryPlaylistGroup,
                                     onCancelAll = viewModel::cancelAllJobs,
                                     onClearFinished = viewModel::clearFinishedJobs
                                 )

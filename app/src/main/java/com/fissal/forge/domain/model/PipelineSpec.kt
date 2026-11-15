@@ -41,8 +41,16 @@ enum class DownloadMode(val label: String) {
 enum class VideoCodecChoice(val label: String) {
     H264("H.264"),
     HEVC("HEVC / H.265"),
+    AV1("AV1 (SVT-AV1)"),
     VP9("VP9"),
     COPY("Stream Copy")
+}
+
+@Serializable
+enum class CompressionTier(val label: String, val subtitle: String) {
+    PERCEPTUAL_AV1("Smart AV1 + Opus", "Highest compression efficiency (ideal for long clips -> 25 MB)"),
+    TWO_PASS_HEVC("2-Pass HEVC", "Dual-pass x265 psychovisual AQ"),
+    COMPATIBLE_H264("Universal H.264", "2-pass H.264 + AAC for older devices")
 }
 
 @Serializable
@@ -66,6 +74,7 @@ enum class CompressMode {
 data class DownloadSpec(
     val url: String,
     val playlistSingleOnly: Boolean = true,
+    val playlistItemIndex: Int? = null,
     val mode: DownloadMode = DownloadMode.VIDEO_MP4,
     val maxHeight: Int? = 1080,
     val audioFormat: String = "mp3",
@@ -89,7 +98,9 @@ data class CompressSpec(
     val imageQuality: Int = 88,
     val targetBytes: Long? = null,
     val maxDimensionPx: Int? = null,
-    val rawHalfSizeFast: Boolean = false
+    val rawHalfSizeFast: Boolean = false,
+    val tier: CompressionTier = CompressionTier.PERCEPTUAL_AV1,
+    val twoPass: Boolean = true
 )
 
 @Serializable

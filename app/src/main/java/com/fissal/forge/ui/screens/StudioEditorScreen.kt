@@ -73,8 +73,10 @@ import com.fissal.forge.domain.logic.BitrateBudgetCalculator
 import com.fissal.forge.domain.model.AspectPreset
 import com.fissal.forge.domain.model.AudioCodecChoice
 import com.fissal.forge.domain.model.CompressMode
+import com.fissal.forge.domain.model.CompressionTier
 import com.fissal.forge.domain.model.MediaKind
 import com.fissal.forge.domain.model.VideoCodecChoice
+import com.fissal.forge.ui.StudioItemConfig
 import com.fissal.forge.ui.StudioSessionState
 import com.fissal.forge.ui.StudioToolTab
 import com.fissal.forge.ui.components.CropCanvasOverlay
@@ -96,7 +98,12 @@ import kotlin.math.roundToLong
 fun StudioEditorScreen(
     state: StudioSessionState,
     jobs: List<ForgeJobEntity>,
-    onUpdate: ((StudioSessionState) -> StudioSessionState) -> Unit,
+    onUpdate: ((StudioItemConfig) -> StudioItemConfig) -> Unit,
+    onSelectTab: (StudioToolTab) -> Unit,
+    onClearInlineWatch: () -> Unit,
+    onSelectBatchItem: (Int) -> Unit,
+    onApplySameType: () -> Unit,
+    onApplyAll: () -> Unit,
     onSelectCropPreset: (AspectPreset) -> Unit,
     onExecute: (saveToDevice: Boolean, copyToClipboard: Boolean) -> Unit,
     onRunInBackground: () -> Unit,
@@ -274,6 +281,48 @@ fun StudioEditorScreen(
                     }
                 }
 
+                if (state.isBatch) {
+                    Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                        Text(
+                            text = "Batch Queue (${state.selectedItemIndex + 1}/${state.items.size}) — customize individually or propagate",
+                            style = MaterialTheme.typography.labelSmall,
+                            color = SecundaSilver
+                        )
+                        FlowRow(
+                            horizontalArrangement = Arrangement.spacedBy(6.dp),
+                            verticalArrangement = Arrangement.spacedBy(6.dp)
+                        ) {
+                            state.items.forEachIndexed { idx, item ->
+                                FilterChip(
+                                    selected = idx == state.selectedItemIndex,
+                                    onClick = { onSelectBatchItem(idx) },
+                                    label = {
+                                        Text(
+                                            text = "${idx + 1}. ${item.displayName.take(18)}",
+                                            maxLines = 1
+                                        )
+                                    }
+                                )
+                            }
+                        }
+                        FlowRow(
+                            horizontalArrangement = Arrangement.spacedBy(8.dp),
+                            verticalArrangement = Arrangement.spacedBy(6.dp)
+                        ) {
+                            FilterChip(
+                                selected = false,
+                                onClick = onApplySameType,
+                                label = { Text("Apply to All ${primary.mediaKind.name.lowercase()}") }
+                            )
+                            FilterChip(
+                                selected = false,
+                                onClick = onApplyAll,
+                                label = { Text("Apply to All Files") }
+                            )
+                        }
+                    }
+                }
+
                 // Combinable 4-Tool Selector Chips
                 FlowRow(
                     horizontalArrangement = Arrangement.spacedBy(8.dp),
@@ -311,16 +360,7 @@ fun StudioEditorScreen(
                                     else -> SlateOutline
                                 }
                             ),
-                            modifier = Modifier.clickable {
-                                onUpdate { cur ->
-                                    when (tab) {
-                                        StudioToolTab.CONVERT -> cur.copy(activeTab = tab, convertEnabled = true)
-                                        StudioToolTab.COMPRESS -> cur.copy(activeTab = tab, compressEnabled = true)
-                                        StudioToolTab.TRIM -> cur.copy(activeTab = tab, trimEnabled = true)
-                                        StudioToolTab.CROP -> cur.copy(activeTab = tab, cropEnabled = true)
-                                    }
-                                }
-                            }
+                            modifier = Modifier.clickable { onSelectTab(tab) }
                         ) {
                             Row(
                                 modifier = Modifier.padding(horizontal = 12.dp, vertical = 9.dp),
@@ -469,7 +509,7 @@ fun StudioEditorScreen(
                                         )
                                     }
                                     Button(
-                                        onClick = { onUpdate { it.copy(inlineWatchJobIds = emptyList()) } },
+                                        onClick = onClearInlineWatch,
                                         modifier = Modifier.fillMaxWidth()
                                     ) {
                                         Text("Back to Editor")
@@ -516,7 +556,7 @@ fun StudioEditorScreen(
 @Composable
 private fun ConvertPanel(
     state: StudioSessionState,
-    onUpdate: ((StudioSessionState) -> StudioSessionState) -> Unit
+    onUpdate: ((StudioItemConfig) -> StudioItemConfig) -> Unit
 ) {
     val kind = state.primaryItem.mediaKind
     Row(
@@ -576,7 +616,12 @@ private fun ConvertPanel(
     if (kind == MediaKind.VIDEO && state.targetExtension in setOf("mp4", "mkv", "mov")) {
         Text("Video Codec", style = MaterialTheme.typography.labelMedium, color = SecundaSilver)
         FlowRow(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-            listOf(VideoCodecChoice.H264, VideoCodecChoice.HEVC, VideoCodecChoice.COPY).forEach { codec ->
+            listOf(
+                VideoCodecChoice.AV1,
+                VideoCodecChoice.HEVC,
+                VideoCodecChoice.H264,
+                VideoCodecChoice.COPY
+            ).forEach { codec ->
                 FilterChip(
                     selected = state.videoCodec == codec,
                     onClick = { onUpdate { it.copy(convertEnabled = true, videoCodec = codec) } },
@@ -591,7 +636,7 @@ private fun ConvertPanel(
 @Composable
 private fun CompressPanel(
     state: StudioSessionState,
-    onUpdate: ((StudioSessionState) -> StudioSessionState) -> Unit
+    onUpdate: ((StudioItemConfig) -> StudioItemConfig) -> Unit
 ) {
     val primary = state.primaryItem
     Row(
@@ -621,7 +666,7 @@ private fun CompressPanel(
 
     if (state.compressMode == CompressMode.TARGET_BYTES) {
         FlowRow(horizontalArrangement = Arrangement.spacedBy(8.dp), verticalArrangement = Arrangement.spacedBy(6.dp)) {
-            listOf("2", "8", "10", "25", "50").forEach { mb ->
+            listOf("2", "8", "10", "25", "50", "100").forEach { mb ->
                 FilterChip(
                     selected = state.targetMbText == mb,
                     onClick = { onUpdate { it.copy(compressEnabled = true, targetMbText = mb) } },
@@ -639,6 +684,26 @@ private fun CompressPanel(
             modifier = Modifier.fillMaxWidth()
         )
 
+        if (primary.mediaKind == MediaKind.VIDEO) {
+            Text(
+                text = "Perceptual Compression Engine",
+                style = MaterialTheme.typography.labelMedium,
+                color = SecundaSilver
+            )
+            FlowRow(
+                horizontalArrangement = Arrangement.spacedBy(8.dp),
+                verticalArrangement = Arrangement.spacedBy(6.dp)
+            ) {
+                CompressionTier.entries.forEach { tier ->
+                    FilterChip(
+                        selected = state.compressionTier == tier,
+                        onClick = { onUpdate { it.copy(compressEnabled = true, compressionTier = tier) } },
+                        label = { Text(tier.label) }
+                    )
+                }
+            }
+        }
+
         val targetBytes = state.targetMbText.toDoubleOrNull()?.let { (it * 1024.0 * 1024.0).roundToLong() }
         if (targetBytes != null && primary.mediaKind == MediaKind.VIDEO && primary.durationMs > 0L) {
             val trimDur = if (state.trimEnabled && state.trimEndMs > state.trimStartMs) {
@@ -646,17 +711,27 @@ private fun CompressPanel(
             } else {
                 primary.durationMs
             }
+            val previewCodec = if (state.convertEnabled) {
+                state.videoCodec
+            } else {
+                when (state.compressionTier) {
+                    CompressionTier.PERCEPTUAL_AV1 -> VideoCodecChoice.AV1
+                    CompressionTier.TWO_PASS_HEVC -> VideoCodecChoice.HEVC
+                    CompressionTier.COMPATIBLE_H264 -> VideoCodecChoice.H264
+                }
+            }
             val plan = BitrateBudgetCalculator.calculateVideoBudget(
                 targetBytes = targetBytes,
                 durationMs = trimDur,
                 sourceWidth = primary.effectiveWidth,
                 sourceHeight = primary.effectiveHeight,
                 hasAudio = primary.hasAudio && !state.muteAudio,
-                isHevc = state.videoCodec == VideoCodecChoice.HEVC
+                isHevc = previewCodec == VideoCodecChoice.HEVC,
+                videoCodec = previewCodec,
+                preferOpusAudio = !state.convertEnabled && state.compressionTier == CompressionTier.PERCEPTUAL_AV1
             )
-            val autoRes = plan.targetMaxDimension?.let { " • Auto ${it}p" } ?: ""
             Text(
-                text = "Auto budget: Video ${plan.videoBitrateBps / 1000} kbps • Audio ${plan.audioBitrateBps / 1000} kbps$autoRes",
+                text = "Auto budget: ${plan.strategySummary}",
                 style = MaterialTheme.typography.bodySmall,
                 color = if (plan.isTightBudgetWarning) CoralError else EmeraldSuccess
             )
@@ -713,7 +788,7 @@ private fun CompressPanel(
 @Composable
 private fun TrimPanel(
     state: StudioSessionState,
-    onUpdate: ((StudioSessionState) -> StudioSessionState) -> Unit
+    onUpdate: ((StudioItemConfig) -> StudioItemConfig) -> Unit
 ) {
     val totalMs = state.primaryItem.durationMs.coerceAtLeast(1000L)
     val startMs = state.trimStartMs.coerceIn(0L, totalMs - 500L)
@@ -828,7 +903,7 @@ private fun TrimPanel(
 @Composable
 private fun CropPanel(
     state: StudioSessionState,
-    onUpdate: ((StudioSessionState) -> StudioSessionState) -> Unit,
+    onUpdate: ((StudioItemConfig) -> StudioItemConfig) -> Unit,
     onSelectCropPreset: (AspectPreset) -> Unit
 ) {
     val primary = state.primaryItem

@@ -2,13 +2,12 @@
 
 Native Android Kotlin + Jetpack Compose media utility wrapping **yt-dlp**, **FFmpeg / FFprobe**, **aria2c**, and **LibRaw** (`AndroidLibRaw`).
 
-## Core Capabilities
-- **Batch URL Downloader**: Extracts & cleans tracking parameters (`utm_*`, `si`, `igsh`, `fbclid`) from multi-line links, guards accidental full-playlist pulls (`--no-playlist` toggle), accelerates downloads via `aria2c`, and optionally chains post-download compression/transcoding.
-- **Android Share Menu Intercept (`ACTION_SEND` / `ACTION_SEND_MULTIPLE`)**: Auto-detects shared URLs, photos, Camera RAW files, videos, and audio clips, prepping combinable **Convert**, **Compress**, **Trim**, and **Crop** controls.
-- **Canonical Aspect-Snap Crop**: Automatically snaps default crop bounds to the closest canonical **16:9** or **4:3** resolution (**9:16** / **3:4** on portrait media) with strictly even-pixel coordinates safe for `yuv420p` encoders.
-- **Exact Target Filesize Reducer**: Computes container-overhead-aware video/audio bitrate budgets + smart resolution downscaling (and binary-search quality encoding for images/RAWs) with automatic corrective retry passes.
-- **Zero-Directory Clipboard Copy**: Exposes processed media via a MIME-resolving `ForgeFileProvider` (`ClipData.newUri`) so files can be pasted directly into Discord, Messages, Telegram, or Email—either standalone (**Copy Only**, zero gallery clutter) or alongside **MediaStore** export (**Save & Copy**).
-- **Crash-Proof Huge RAW & Video Pipeline**: Runs a dual-lane orchestrator (`Network` lane + RAM-weighted `Compute` lane) backed by `Room` persistence and `ForgeForegroundService`, using `LibRaw` half-size fast previews, `BitmapRegionDecoder` subsampling, and `ARGB_8888` mutable buffers.
+## Core Capabilities (`v1.1.0`)
+- **Resolved Link Chips**: Pasted links automatically resolve via bounded `yt-dlp --flat-playlist --dump-single-json` lookups into expandable cards with thumbnails, detected media type (`Audio`, `Video`, `Playlist`, `Image`), host, duration, per-link format/codec controls, and post-download target filesize budgets.
+- **Playlist Song Visualizer & Queue Removal**: Expanded playlist chips visualize every individual track with duration/uploader metadata and checkboxes (`Select All` / `Clear`); queued playlists fan out into per-song tracked jobs with aggregate playlist progress, `Cancel Playlist`, `Retry Failed`, and 1-tap `Remove Playlist`.
+- **Perceptual SVT-AV1 + Opus Target-Filesize Engine**: Automatically computes packet/container-aware bitrates, Lanczos scaling, adaptive FPS stepping, and gentle temporal denoising (`hqdn3d`) using `libsvtav1` + `libopus` (or 2-pass `libx265` / `libx264`) so even extreme targets like a **30-minute video under 25 MB** fit cleanly with minimal quality loss.
+- **Bulk Site & File-Type Propagation**: Apply settings from any link chip or batch Studio item across **All `<Audio/Video/...>`**, **This Site (`<host>`)**, or **All Links**, while keeping individual overrides intact.
+- **Workflow Pipeline Dashboard**: Visualizes the 3-stage pipeline (`Resolve` -> `Fetch` -> `Forge`) with live network/compute gauges and active playlist monitoring alongside the local/RAW studio, canonical 16:9 / 4:3 crop snapping, and zero-directory clipboard export.
 
 ## Build, Release Signing & ABI Splits
 ```bash

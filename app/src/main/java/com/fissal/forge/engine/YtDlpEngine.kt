@@ -1,7 +1,9 @@
 package com.fissal.forge.engine
 
+import com.fissal.forge.domain.logic.YtDlpJsonParser
 import com.fissal.forge.domain.model.DownloadMode
 import com.fissal.forge.domain.model.DownloadSpec
+import com.fissal.forge.domain.model.ResolvedUrlMetadata
 import com.yausername.youtubedl_android.YoutubeDL
 import com.yausername.youtubedl_android.YoutubeDLRequest
 import kotlinx.coroutines.CancellationException
@@ -13,24 +15,63 @@ import java.io.IOException
 import kotlin.coroutines.coroutineContext
 
 /**
- * Executes yt-dlp downloads inside an isolated per-job working directory with optional aria2c acceleration.
+ * Executes yt-dlp metadata inspection and isolated per-job downloads with aria2c acceleration.
  */
 class YtDlpEngine(private val binaryManager: NativeBinaryManager) {
+
+    suspend fun resolveMetadata(
+        url: String,
+        cancelKey: String
+    ): ResolvedUrlMetadata = withContext(Dispatchers.IO) {
+        binaryManager.ensureInitialized()
+        val request = YoutubeDLRequest(url).apply {
+            addOption("--flat-playlist")
+            addOption("--dump-single-json")
+            addOption("--no-warnings")
+            addOption("--ignore-errors")
+            addOption("--socket-timeout", "12")
+        }
+
+        val processId = "resolve_$cancelKey"
+        val cancelHandle = coroutineContext.job.invokeOnCompletion { cause ->
+            if (cause is CancellationException) {
+                YoutubeDL.getInstance().destroyProcessById(processId)
+            }
+        }
+
+        val response = try {
+            YoutubeDL.getInstance().execute(request, processId)
+        } finally {
+            cancelHandle.dispose()
+        }
+
+        val outText = response.out.orEmpty()
+        if (outText.isBlank()) {
+            throw IOException(response.err?.lineSequence()?.firstOrNull { it.isNotBlank() } ?: "Empty metadata response")
+        }
+        YtDlpJsonParser.parse(url, outText)
+    }
 
     suspend fun download(
         jobId: String,
         spec: DownloadSpec,
         workDir: File,
+        downloadHeightOverride: Int? = null,
         onProgress: (Float, String) -> Unit
     ): List<File> = withContext(Dispatchers.IO) {
         binaryManager.ensureInitialized()
         if (!workDir.exists()) workDir.mkdirs()
 
+        val effectiveMaxHeight = listOfNotNull(spec.maxHeight, downloadHeightOverride).minOrNull()
+
         val request = YoutubeDLRequest(spec.url).apply {
             addOption("-o", "${workDir.absolutePath}/%(title).120B [%(id)s].%(ext)s")
             addOption("--no-mtime")
             addOption("--restrict-filenames")
-            if (spec.playlistSingleOnly) {
+            if (spec.playlistItemIndex != null) {
+                addOption("--yes-playlist")
+                addOption("--playlist-items", spec.playlistItemIndex.toString())
+            } else if (spec.playlistSingleOnly) {
                 addOption("--no-playlist")
             } else {
                 addOption("--yes-playlist")
@@ -43,9 +84,8 @@ class YtDlpEngine(private val binaryManager: NativeBinaryManager) {
 
             when (spec.mode) {
                 DownloadMode.VIDEO_MP4 -> {
-                    val h = spec.maxHeight
-                    val format = if (h != null) {
-                        "bv*[height<=$h][ext=mp4]+ba[ext=m4a]/b[height<=$h][ext=mp4]/bv*[height<=$h]+ba/b[height<=$h]/b"
+                    val format = if (effectiveMaxHeight != null) {
+                        "bv*[height<=$effectiveMaxHeight][ext=mp4]+ba[ext=m4a]/b[height<=$effectiveMaxHeight][ext=mp4]/bv*[height<=$effectiveMaxHeight]+ba/b[height<=$effectiveMaxHeight]/b"
                     } else {
                         "bv*[ext=mp4]+ba[ext=m4a]/b[ext=mp4]/bv*+ba/b"
                     }
@@ -53,9 +93,8 @@ class YtDlpEngine(private val binaryManager: NativeBinaryManager) {
                     addOption("--merge-output-format", "mp4")
                 }
                 DownloadMode.VIDEO_BEST_MKV -> {
-                    val h = spec.maxHeight
-                    val format = if (h != null) {
-                        "bv*[height<=$h]+ba/b[height<=$h]/b"
+                    val format = if (effectiveMaxHeight != null) {
+                        "bv*[height<=$effectiveMaxHeight]+ba/b[height<=$effectiveMaxHeight]/b"
                     } else {
                         "bv*+ba/b"
                     }
