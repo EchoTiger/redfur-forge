@@ -1,0 +1,148 @@
+package com.fissal.forge.domain.model
+
+import kotlinx.serialization.Serializable
+
+@Serializable
+enum class AspectPreset(val label: String, val ratioW: Int?, val ratioH: Int?) {
+    AUTO_CLOSEST("Closest (16:9 / 4:3)", null, null),
+    RATIO_16_9("16:9", 16, 9),
+    RATIO_4_3("4:3", 4, 3),
+    RATIO_9_16("9:16", 9, 16),
+    RATIO_3_4("3:4", 3, 4),
+    RATIO_1_1("1:1", 1, 1),
+    RATIO_3_2("3:2", 3, 2),
+    RATIO_2_3("2:3", 2, 3),
+    FREEFORM("Free", null, null)
+}
+
+@Serializable
+data class CropRectNormalized(
+    val left: Float = 0f,
+    val top: Float = 0f,
+    val right: Float = 1f,
+    val bottom: Float = 1f
+)
+
+data class PixelCropRect(
+    val x: Int,
+    val y: Int,
+    val width: Int,
+    val height: Int
+)
+
+@Serializable
+enum class DownloadMode(val label: String) {
+    VIDEO_MP4("MP4 Universal"),
+    VIDEO_BEST_MKV("Best Quality MKV"),
+    AUDIO_ONLY("Audio Only")
+}
+
+@Serializable
+enum class VideoCodecChoice(val label: String) {
+    H264("H.264"),
+    HEVC("HEVC / H.265"),
+    VP9("VP9"),
+    COPY("Stream Copy")
+}
+
+@Serializable
+enum class AudioCodecChoice(val label: String) {
+    AAC("AAC"),
+    MP3("MP3"),
+    OPUS("Opus"),
+    FLAC("FLAC"),
+    WAV("WAV"),
+    MUTE("Mute"),
+    COPY("Stream Copy")
+}
+
+@Serializable
+enum class CompressMode {
+    QUALITY,
+    TARGET_BYTES
+}
+
+@Serializable
+data class DownloadSpec(
+    val url: String,
+    val playlistSingleOnly: Boolean = true,
+    val mode: DownloadMode = DownloadMode.VIDEO_MP4,
+    val maxHeight: Int? = 1080,
+    val audioFormat: String = "mp3",
+    val embedMetadata: Boolean = true,
+    val embedThumbnail: Boolean = true,
+    val sponsorBlock: Boolean = false,
+    val useAria2c: Boolean = true
+)
+
+@Serializable
+data class ConvertSpec(
+    val targetExtension: String,
+    val videoCodec: VideoCodecChoice = VideoCodecChoice.H264,
+    val audioCodec: AudioCodecChoice = AudioCodecChoice.AAC
+)
+
+@Serializable
+data class CompressSpec(
+    val mode: CompressMode = CompressMode.QUALITY,
+    val videoCrf: Int = 23,
+    val imageQuality: Int = 88,
+    val targetBytes: Long? = null,
+    val maxDimensionPx: Int? = null,
+    val rawHalfSizeFast: Boolean = false
+)
+
+@Serializable
+data class TrimSpec(
+    val startMs: Long = 0L,
+    val endMs: Long? = null,
+    val fastKeyframeCopy: Boolean = false,
+    val fadeInOut: Boolean = false,
+    val muteAudio: Boolean = false
+)
+
+@Serializable
+data class CropSpec(
+    val preset: AspectPreset = AspectPreset.AUTO_CLOSEST,
+    val rect: CropRectNormalized = CropRectNormalized()
+)
+
+@Serializable
+data class DeliverySpec(
+    val saveToDevice: Boolean = true,
+    val copyToClipboard: Boolean = false,
+    val stripMetadata: Boolean = false,
+    val filenameSuffix: String = "_forge"
+)
+
+@Serializable
+data class PipelineSpec(
+    val download: DownloadSpec? = null,
+    val convert: ConvertSpec? = null,
+    val compress: CompressSpec? = null,
+    val trim: TrimSpec? = null,
+    val crop: CropSpec? = null,
+    val delivery: DeliverySpec = DeliverySpec()
+) {
+    val hasTransformStage: Boolean
+        get() = convert != null || compress != null || trim != null || crop != null
+
+    fun summaryLabel(): String {
+        val parts = mutableListOf<String>()
+        if (download != null) parts += download.mode.label
+        if (convert != null) parts += "→ ${convert.targetExtension.uppercase()}"
+        if (compress != null) {
+            parts += if (compress.mode == CompressMode.TARGET_BYTES && compress.targetBytes != null) {
+                val mb = compress.targetBytes / (1024.0 * 1024.0)
+                if (mb >= 1.0) String.format("≤ %.1f MB", mb) else "${compress.targetBytes / 1024} KB"
+            } else {
+                "Compress Q${compress.videoCrf}"
+            }
+        }
+        if (trim != null) parts += "Trim"
+        if (crop != null) parts += "Crop ${crop.preset.label}"
+        if (delivery.copyToClipboard && !delivery.saveToDevice) parts += "Copy Only"
+        else if (delivery.copyToClipboard) parts += "+Clipboard"
+        return if (parts.isEmpty()) "Passthrough" else parts.joinToString(" • ")
+    }
+}

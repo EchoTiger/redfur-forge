@@ -1,0 +1,4 @@
+-keep class com.yausername.** { *; }
+-keep class com.homesoft.photo.libraw.** { *; }
+-keep class com.fasterxml.jackson.** { *; }
+-dontwarn com.fasterxml.jackson.**
