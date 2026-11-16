@@ -263,4 +263,53 @@ class PipelineSpecSerializationTest {
         assertTrue(trimNestedSilence.hasTransformStage)
         assertEquals("Trim • Silence Skip", trimNestedSilence.summaryLabel())
     }
+
+    @Test
+    fun roundTripsWave2DeliveryMetadataLinkSilenceSkipAndAuthFields() {
+        val silence = SilenceSkipSpec(enabled = true, thresholdDb = -30, minSilenceMs = 400)
+        val spec = PipelineSpec(
+            delivery = DeliverySpec(
+                saveToDevice = true,
+                copyToClipboard = false,
+                stripMetadata = false,
+                filenameSuffix = "_forge",
+                customOutputBaseName = "01 - Track One",
+                metadataTitle = "Track One",
+                metadataArtist = "Echo",
+                metadataAlbum = "Synth Mix",
+                metadataTrack = "1/8"
+            ),
+            silenceSkip = silence
+        )
+        val encoded = json.encodeToString(spec)
+        val decoded = json.decodeFromString<PipelineSpec>(encoded)
+        assertEquals(spec, decoded)
+        assertEquals("01 - Track One", decoded.delivery.customOutputBaseName)
+        assertEquals("Track One", decoded.delivery.metadataTitle)
+        assertEquals("Echo", decoded.delivery.metadataArtist)
+        assertEquals("Synth Mix", decoded.delivery.metadataAlbum)
+        assertEquals("1/8", decoded.delivery.metadataTrack)
+
+        val chip = ResolvedLinkChipItem(
+            cleanUrl = "https://www.patreon.com/posts/123",
+            host = "patreon.com",
+            resolveState = LinkResolveState.FAILED,
+            settings = LinkItemSettings(
+                mode = DownloadMode.AUDIO_ONLY,
+                audioFormat = "opus",
+                splitByChapters = true,
+                silenceSkip = silence
+            ),
+            authRequiredReason = "Patron-only audio requires sign-in.",
+            authIsPaywall = true,
+            authServiceId = "patreon"
+        )
+        val chipEncoded = json.encodeToString(chip)
+        val chipDecoded = json.decodeFromString<ResolvedLinkChipItem>(chipEncoded)
+        assertEquals(chip, chipDecoded)
+        assertTrue(chipDecoded.settings.compactSummary().contains("Chapters"))
+        assertTrue(chipDecoded.settings.compactSummary().contains("Silence Skip"))
+        assertEquals("patreon", chipDecoded.authServiceId)
+        assertTrue(chipDecoded.authIsPaywall)
+    }
 }

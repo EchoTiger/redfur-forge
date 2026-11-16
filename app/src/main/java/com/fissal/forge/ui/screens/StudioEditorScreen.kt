@@ -91,6 +91,7 @@ import com.fissal.forge.ui.components.EngineDomain
 import com.fissal.forge.ui.components.ForgeInfoTipButton
 import com.fissal.forge.ui.components.ForgePrimaryButton
 import com.fissal.forge.ui.components.LiveSizeEstimateBadge
+import com.fissal.forge.ui.components.SilenceSkipControlPanel
 import com.fissal.forge.ui.components.WorkshopDomainCard
 import com.fissal.forge.ui.theme.AnvilGunmetal
 import com.fissal.forge.ui.theme.ArcRelayCyan
@@ -1249,26 +1250,35 @@ private fun TrimPanel(
         )
     }
 
-    val isAudioOutput = state.primaryItem.mediaKind == MediaKind.AUDIO ||
-        state.targetExtension.lowercase() in setOf("mp3", "m4a", "aac", "opus", "ogg", "flac", "wav")
-    if (isAudioOutput) {
-        Row(
-            modifier = Modifier.fillMaxWidth(),
-            horizontalArrangement = Arrangement.SpaceBetween,
-            verticalAlignment = Alignment.CenterVertically
+    val hasAudioOutput = state.primaryItem.mediaKind == MediaKind.AUDIO ||
+        (state.primaryItem.hasAudio &&
+            !state.muteAudio &&
+            state.audioCodec != AudioCodecChoice.MUTE &&
+            state.targetExtension.lowercase() != "gif")
+
+    SilenceSkipControlPanel(
+        enabled = state.silenceSkipEnabled,
+        thresholdDb = state.silenceThresholdDb,
+        minSilenceMs = state.silenceMinDurationMs,
+        subtitle = if (state.primaryItem.mediaKind == MediaKind.VIDEO &&
+            state.targetExtension.lowercase() !in setOf("mp3", "m4a", "aac", "opus", "ogg", "flac", "wav")
         ) {
-            Column(modifier = Modifier.weight(1f)) {
-                Text("Dead-Air / Silence Skip", style = MaterialTheme.typography.bodySmall, color = CrispWhite)
-                Text("Tightens quiet gaps on audio exports", style = MaterialTheme.typography.labelSmall, color = MutedSteel)
-            }
-            ForgeInfoTipButton(topic = SettingTopic.DEAD_AIR_SKIP, capabilityReport = deviceCapabilities)
-            Spacer(Modifier.width(6.dp))
-            Switch(
-                checked = state.silenceSkipEnabled,
-                onCheckedChange = { checked -> onUpdate { it.copy(trimEnabled = true, silenceSkipEnabled = checked) } }
-            )
+            "Tightens dead pauses with synchronized A/V jumpcuts"
+        } else {
+            "Tightens quiet pauses cleanly without clipping speech tails"
+        },
+        audioAvailable = hasAudioOutput,
+        capabilityReport = deviceCapabilities,
+        onToggleEnabled = { checked ->
+            onUpdate { it.copy(trimEnabled = true, silenceSkipEnabled = checked) }
+        },
+        onSelectThresholdDb = { db ->
+            onUpdate { it.copy(trimEnabled = true, silenceSkipEnabled = true, silenceThresholdDb = db) }
+        },
+        onSelectMinSilenceMs = { ms ->
+            onUpdate { it.copy(trimEnabled = true, silenceSkipEnabled = true, silenceMinDurationMs = ms) }
         }
-    }
+    )
 }
 
 @OptIn(ExperimentalLayoutApi::class)

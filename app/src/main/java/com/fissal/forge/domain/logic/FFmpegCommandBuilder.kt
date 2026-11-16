@@ -6,9 +6,11 @@ import com.fissal.forge.domain.model.CompressionTier
 import com.fissal.forge.domain.model.MediaKind
 import com.fissal.forge.domain.model.MediaProbeResult
 import com.fissal.forge.domain.model.PipelineSpec
+import com.fissal.forge.domain.model.SilenceSkipSpec
 import com.fissal.forge.domain.model.VideoCodecChoice
 import java.util.Locale
 import kotlin.math.min
+import kotlin.math.roundToLong
 
 enum class EncodePassMode {
     SINGLE,
@@ -24,6 +26,175 @@ enum class EncodePassMode {
 object FFmpegCommandBuilder {
 
     private val AUDIO_ONLY_EXTENSIONS = setOf("mp3", "m4a", "aac", "opus", "ogg", "flac", "wav")
+    private val SILENCE_START_REGEX = Regex("""\[silencedetect\b[^\]]*]\s*silence_start:\s*([^\s|]+)""")
+    private val SILENCE_END_REGEX = Regex("""\[silencedetect\b[^\]]*]\s*silence_end:\s*([^\s|]+)""")
+    private val SILENCE_DURATION_REGEX = Regex("""silence_duration:\s*([^\s|]+)""")
+
+    fun buildSilenceRemoveFilterExpr(
+        silenceSpec: SilenceSkipSpec,
+        preserveInputTimestamps: Boolean
+    ): String {
+        val thresholdDb = silenceSpec.thresholdDb.coerceIn(-90, 0)
+        val durationSec = String.format(
+            Locale.US,
+            "%.3f",
+            silenceSpec.minSilenceMs.coerceIn(50, 10_000) / 1000.0
+        )
+        val base = "silenceremove=start_periods=1:start_threshold=${thresholdDb}dB:stop_periods=-1:stop_duration=$durationSec:stop_threshold=${thresholdDb}dB:window=0.02"
+        return if (preserveInputTimestamps) "$base:timestamp=copy" else base
+    }
+
+    /**
+     * Parses FFmpeg `silencedetect` logs into padded, non-overlapping keep intervals `[startMs, endMs]`
+     * within `[0L, clipDurationMs]`, coalescing shortest silence gaps if segment count exceeds [maxSegments].
+     */
+    fun parseSilenceKeepSegments(
+        ffmpegLog: String,
+        clipDurationMs: Long,
+        speechPadMs: Long = 80L,
+        maxSegments: Int = 64
+    ): List<Pair<Long, Long>> {
+        if (clipDurationMs <= 0L || ffmpegLog.isBlank()) return emptyList()
+
+        val rawSilences = mutableListOf<Pair<Long, Long>>()
+        var openSilenceStartMs: Long? = null
+
+        for (line in ffmpegLog.lineSequence()) {
+            val startMatch = SILENCE_START_REGEX.find(line)
+            if (startMatch != null) {
+                val sec = startMatch.groupValues[1].toDoubleOrNull()
+                if (sec != null && sec.isFinite()) {
+                    val ms = (sec * 1000.0).roundToLong().coerceIn(0L, clipDurationMs)
+                    if (openSilenceStartMs == null) {
+                        openSilenceStartMs = ms
+                    }
+                }
+                continue
+            }
+
+            val endMatch = SILENCE_END_REGEX.find(line)
+            if (endMatch != null) {
+                val endSec = endMatch.groupValues[1].toDoubleOrNull()
+                if (endSec != null && endSec.isFinite()) {
+                    val endMs = (endSec * 1000.0).roundToLong().coerceIn(0L, clipDurationMs)
+                    val durMs = SILENCE_DURATION_REGEX.find(line)?.groupValues?.getOrNull(1)
+                        ?.toDoubleOrNull()
+                        ?.takeIf { it.isFinite() }
+                        ?.let { (it * 1000.0).roundToLong().coerceAtLeast(0L) }
+                    val startMs = openSilenceStartMs ?: durMs?.let { (endMs - it).coerceAtLeast(0L) } ?: 0L
+                    openSilenceStartMs = null
+                    if (endMs > startMs) {
+                        rawSilences += startMs to endMs
+                    }
+                }
+            }
+        }
+
+        if (openSilenceStartMs != null && clipDurationMs > openSilenceStartMs) {
+            rawSilences += openSilenceStartMs to clipDurationMs
+        }
+
+        if (rawSilences.isEmpty()) return emptyList()
+
+        // Merge overlapping/adjacent silent intervals first
+        val sortedSilences = rawSilences.sortedBy { it.first }
+        val mergedSilences = mutableListOf<Pair<Long, Long>>()
+        for (seg in sortedSilences) {
+            if (mergedSilences.isEmpty() || seg.first > mergedSilences.last().second) {
+                mergedSilences += seg
+            } else {
+                val prev = mergedSilences.removeAt(mergedSilences.lastIndex)
+                mergedSilences += prev.first to maxOf(prev.second, seg.second)
+            }
+        }
+
+        // Invert silences into raw speech/keep segments
+        val rawKeeps = mutableListOf<Pair<Long, Long>>()
+        var cursor = 0L
+        for ((sStart, sEnd) in mergedSilences) {
+            if (sStart > cursor) {
+                rawKeeps += cursor to sStart
+            }
+            cursor = maxOf(cursor, sEnd)
+        }
+        if (cursor < clipDurationMs) {
+            rawKeeps += cursor to clipDurationMs
+        }
+
+        if (rawKeeps.isEmpty()) return emptyList()
+
+        // Widen each keep boundary outward by speechPadMs and merge overlapping intervals
+        val pad = speechPadMs.coerceAtLeast(0L)
+        val padded = rawKeeps.map { (kStart, kEnd) ->
+            (kStart - pad).coerceAtLeast(0L) to (kEnd + pad).coerceAtMost(clipDurationMs)
+        }
+        val mergedKeeps = mutableListOf<Pair<Long, Long>>()
+        for (seg in padded) {
+            if (seg.second <= seg.first) continue
+            if (mergedKeeps.isEmpty() || seg.first > mergedKeeps.last().second) {
+                mergedKeeps += seg
+            } else {
+                val prev = mergedKeeps.removeAt(mergedKeeps.lastIndex)
+                mergedKeeps += prev.first to maxOf(prev.second, seg.second)
+            }
+        }
+
+        val segmentCap = maxSegments.coerceAtLeast(1)
+        while (mergedKeeps.size > segmentCap) {
+            var minGapIdx = 0
+            var minGap = Long.MAX_VALUE
+            for (i in 0 until mergedKeeps.lastIndex) {
+                val gap = mergedKeeps[i + 1].first - mergedKeeps[i].second
+                if (gap < minGap) {
+                    minGap = gap
+                    minGapIdx = i
+                }
+            }
+            val first = mergedKeeps[minGapIdx]
+            val second = mergedKeeps.removeAt(minGapIdx + 1)
+            mergedKeeps[minGapIdx] = first.first to second.second
+        }
+
+        return mergedKeeps
+    }
+
+    /**
+     * Builds synchronized FFmpeg video (`select` + `setpts`) and audio (`aselect` + `asetpts`)
+     * expressions so CFR and VFR timelines remain frame-accurate across jumpcuts.
+     */
+    fun buildSyncedJumpcutFilters(keepSegmentsMs: List<Pair<Long, Long>>): Pair<String, String> {
+        val segments = keepSegmentsMs
+            .filter { it.second > it.first }
+            .sortedBy { it.first }
+        if (segments.isEmpty()) {
+            return "null" to "anull"
+        }
+
+        val betweenExprs = segments.map { (startMs, endMs) ->
+            "between(t,${formatSeconds(startMs)},${formatSeconds(endMs)})"
+        }
+        val selectSum = betweenExprs.joinToString("+")
+
+        var keptBeforeMs = 0L
+        val dropSecs = ArrayList<String>(segments.size)
+        for ((startMs, endMs) in segments) {
+            val droppedBeforeMs = (startMs - keptBeforeMs).coerceAtLeast(0L)
+            dropSecs += formatSeconds(droppedBeforeMs)
+            keptBeforeMs += (endMs - startMs)
+        }
+
+        var setptsExpr = "(T-${dropSecs.last()})/TB"
+        for (i in segments.lastIndex - 1 downTo 0) {
+            val (startMs, endMs) = segments[i]
+            val startSec = formatSeconds(startMs)
+            val endSec = formatSeconds(endMs)
+            setptsExpr = "if(between(T,$startSec,$endSec),(T-${dropSecs[i]})/TB,$setptsExpr)"
+        }
+
+        val vf = "select='$selectSum',setpts='$setptsExpr'"
+        val af = "aselect='$selectSum',asetpts=N/SR/TB"
+        return vf to af
+    }
 
     fun resolveEffectiveVideoCodec(probe: MediaProbeResult, spec: PipelineSpec): VideoCodecChoice {
         val targetExt = (spec.convert?.targetExtension ?: probe.extension).lowercase(Locale.US)
@@ -73,7 +244,9 @@ object FFmpegCommandBuilder {
         bitrateMultiplier: Double = 1.0,
         passMode: EncodePassMode = EncodePassMode.SINGLE,
         passLogPrefix: String? = null,
-        complexityFactor: Double = 1.0
+        complexityFactor: Double = 1.0,
+        keepSegmentsMs: List<Pair<Long, Long>>? = null,
+        skipAudioFallbackSilenceRemove: Boolean = false
     ): List<String> {
         val trim = spec.trim
         val crop = spec.crop
@@ -99,14 +272,14 @@ object FFmpegCommandBuilder {
         )
 
         val isAudioOnly = targetExt in AUDIO_ONLY_EXTENSIONS || probe.mediaKind == MediaKind.AUDIO
-        val silenceSkipEnabled = spec.silenceSkip?.enabled == true || trim?.silenceSkip?.enabled == true
+        val silenceSpec = spec.silenceSkip?.takeIf { it.enabled } ?: trim?.silenceSkip?.takeIf { it.enabled }
         val canFastStreamCopyTrim = trim != null &&
             trim.fastKeyframeCopy &&
             crop == null &&
             compress == null &&
             !trim.fadeInOut &&
             !trim.muteAudio &&
-            !silenceSkipEnabled &&
+            silenceSpec == null &&
             (convert == null || convert.videoCodec == VideoCodecChoice.COPY)
 
         if (canFastStreamCopyTrim) {
@@ -119,6 +292,8 @@ object FFmpegCommandBuilder {
             args += listOf("-i", inputPath, "-c", "copy", "-avoid_negative_ts", "make_zero")
             if (spec.delivery.stripMetadata) {
                 args += listOf("-map_metadata", "-1")
+            } else {
+                appendDeliveryMetadataArgs(args, spec)
             }
             args += outputPath
             return args
@@ -137,6 +312,7 @@ object FFmpegCommandBuilder {
                 args = args,
                 targetExt = targetExt,
                 spec = spec,
+                silenceSpec = silenceSpec,
                 effectiveDurationMs = effectiveDurationMs,
                 threadCount = threadCount,
                 bitrateMultiplier = bitrateMultiplier
@@ -163,6 +339,18 @@ object FFmpegCommandBuilder {
             convert?.audioCodec != AudioCodecChoice.MUTE &&
             targetExt != "gif"
 
+        val silenceActiveOnVideoAudio = hasAudio && silenceSpec != null
+        val activeKeepSegments = if (silenceActiveOnVideoAudio && !keepSegmentsMs.isNullOrEmpty()) {
+            keepSegmentsMs
+        } else {
+            null
+        }
+        val postCutDurationMs = if (activeKeepSegments != null) {
+            activeKeepSegments.sumOf { (it.second - it.first).coerceAtLeast(0L) }.coerceAtLeast(500L)
+        } else {
+            effectiveDurationMs
+        }
+
         val preferOpusAudio = targetExt == "webm" ||
             convert?.audioCodec == AudioCodecChoice.OPUS ||
             (compress?.mode == CompressMode.TARGET_BYTES &&
@@ -179,7 +367,7 @@ object FFmpegCommandBuilder {
             val scaledBytes = (compress.targetBytes * bitrateMultiplier).toLong().coerceAtLeast(32L * 1024L)
             BitrateBudgetCalculator.calculateVideoBudget(
                 targetBytes = scaledBytes,
-                durationMs = effectiveDurationMs.coerceAtLeast(1000L),
+                durationMs = postCutDurationMs.coerceAtLeast(1000L),
                 sourceWidth = postCropW,
                 sourceHeight = postCropH,
                 hasAudio = hasAudio,
@@ -219,7 +407,11 @@ object FFmpegCommandBuilder {
             return args
         }
 
+        val jumpcutFilters = activeKeepSegments?.let { buildSyncedJumpcutFilters(it) }
         val vfParts = mutableListOf<String>()
+        if (jumpcutFilters != null) {
+            vfParts += jumpcutFilters.first
+        }
         if (pixelCrop != null) {
             vfParts += "crop=${pixelCrop.width}:${pixelCrop.height}:${pixelCrop.x}:${pixelCrop.y}"
         }
@@ -236,14 +428,20 @@ object FFmpegCommandBuilder {
         }
         if (trim?.fadeInOut == true) {
             vfParts += "fade=t=in:st=0:d=0.4"
-            if (effectiveDurationMs > 1200L) {
-                val outStart = (effectiveDurationMs / 1000.0) - 0.4
+            if (postCutDurationMs > 1200L) {
+                val outStart = (postCutDurationMs / 1000.0) - 0.4
                 vfParts += String.format(Locale.US, "fade=t=out:st=%.3f:d=0.4", outStart.coerceAtLeast(0.5))
             }
         }
 
-        val filterRequired = vfParts.isNotEmpty() && (videoCodec != VideoCodecChoice.COPY || pixelCrop != null || requestedMaxDim != null || compress != null)
-        val effectiveVideoCodec = if (videoCodec == VideoCodecChoice.COPY && filterRequired) {
+        val filterRequired = vfParts.isNotEmpty() && (
+            videoCodec != VideoCodecChoice.COPY ||
+                pixelCrop != null ||
+                requestedMaxDim != null ||
+                compress != null ||
+                silenceActiveOnVideoAudio
+            )
+        val effectiveVideoCodec = if (videoCodec == VideoCodecChoice.COPY && (filterRequired || silenceActiveOnVideoAudio)) {
             VideoCodecChoice.H264
         } else {
             videoCodec
@@ -331,21 +529,32 @@ object FFmpegCommandBuilder {
         if (!hasAudio) {
             args += "-an"
         } else {
-            val audioChoice = when {
+            val rawAudioChoice = when {
                 convert?.audioCodec != null -> convert.audioCodec
                 preferOpusAudio -> AudioCodecChoice.OPUS
                 targetExt == "webm" -> AudioCodecChoice.OPUS
                 else -> AudioCodecChoice.AAC
             }
+            val audioChoice = if (rawAudioChoice == AudioCodecChoice.COPY && (silenceActiveOnVideoAudio || trim?.fadeInOut == true)) {
+                if (targetExt == "webm") AudioCodecChoice.OPUS else AudioCodecChoice.AAC
+            } else {
+                rawAudioChoice
+            }
             val afParts = mutableListOf<String>()
+            if (jumpcutFilters != null) {
+                afParts += jumpcutFilters.second
+            }
             if (audioChoice == AudioCodecChoice.OPUS) {
                 // Resample to 48kHz with highpass via SoX so Opus accepts any phone/web input cleanly
                 afParts += listOf("aresample=48000:resampler=soxr", "highpass=f=35")
             }
+            if (silenceActiveOnVideoAudio && jumpcutFilters == null && !skipAudioFallbackSilenceRemove) {
+                afParts += buildSilenceRemoveFilterExpr(silenceSpec!!, preserveInputTimestamps = true)
+            }
             if (trim?.fadeInOut == true) {
                 afParts += "afade=t=in:st=0:d=0.4"
-                if (effectiveDurationMs > 1200L) {
-                    val outStart = (effectiveDurationMs / 1000.0) - 0.4
+                if (postCutDurationMs > 1200L) {
+                    val outStart = (postCutDurationMs / 1000.0) - 0.4
                     afParts += String.format(Locale.US, "afade=t=out:st=%.3f:d=0.4", outStart.coerceAtLeast(0.5))
                 }
             }
@@ -355,13 +564,7 @@ object FFmpegCommandBuilder {
 
             val audioBps = budgetPlan?.audioBitrateBps ?: 128_000L
             when (audioChoice) {
-                AudioCodecChoice.COPY -> {
-                    if (trim?.fadeInOut == true) {
-                        args += listOf("-c:a", "aac", "-b:a", audioBps.toString())
-                    } else {
-                        args += listOf("-c:a", "copy")
-                    }
-                }
+                AudioCodecChoice.COPY -> args += listOf("-c:a", "copy")
                 AudioCodecChoice.AAC -> {
                     if (budgetPlan != null) args += listOf("-ac", "2")
                     args += listOf("-c:a", "aac", "-b:a", audioBps.toString())
@@ -391,6 +594,8 @@ object FFmpegCommandBuilder {
         }
         if (spec.delivery.stripMetadata) {
             args += listOf("-map_metadata", "-1")
+        } else {
+            appendDeliveryMetadataArgs(args, spec)
         }
         args += listOf("-threads", threadCount.coerceIn(1, 8).toString(), outputPath)
         return args
@@ -419,6 +624,7 @@ object FFmpegCommandBuilder {
         args: MutableList<String>,
         targetExt: String,
         spec: PipelineSpec,
+        silenceSpec: SilenceSkipSpec?,
         effectiveDurationMs: Long,
         threadCount: Int,
         bitrateMultiplier: Double
@@ -430,11 +636,8 @@ object FFmpegCommandBuilder {
         if (targetExt == "opus" || targetExt == "ogg") {
             afParts += "aresample=48000:resampler=soxr"
         }
-        val silenceSpec = spec.silenceSkip?.takeIf { it.enabled } ?: trim?.silenceSkip?.takeIf { it.enabled }
-        if (silenceSpec != null) {
-            val durationSec = String.format(Locale.US, "%.3f", silenceSpec.minSilenceMs.coerceIn(50, 10_000) / 1000.0)
-            val thresholdDb = silenceSpec.thresholdDb.coerceIn(-90, 0)
-            afParts += "silenceremove=stop_periods=-1:stop_duration=$durationSec:stop_threshold=${thresholdDb}dB"
+        if (silenceSpec != null && trim?.muteAudio != true && spec.convert?.audioCodec != AudioCodecChoice.MUTE) {
+            afParts += buildSilenceRemoveFilterExpr(silenceSpec, preserveInputTimestamps = false)
         }
         if (trim?.fadeInOut == true) {
             afParts += "afade=t=in:st=0:d=0.4"
@@ -470,8 +673,26 @@ object FFmpegCommandBuilder {
 
         if (spec.delivery.stripMetadata) {
             args += listOf("-map_metadata", "-1")
+        } else {
+            appendDeliveryMetadataArgs(args, spec)
         }
         args += listOf("-threads", threadCount.coerceIn(1, 8).toString())
+    }
+
+    private fun appendDeliveryMetadataArgs(args: MutableList<String>, spec: PipelineSpec) {
+        if (spec.delivery.stripMetadata) return
+        spec.delivery.metadataTitle?.trim()?.takeIf { it.isNotEmpty() }?.let {
+            args += listOf("-metadata", "title=$it")
+        }
+        spec.delivery.metadataArtist?.trim()?.takeIf { it.isNotEmpty() }?.let {
+            args += listOf("-metadata", "artist=$it")
+        }
+        spec.delivery.metadataAlbum?.trim()?.takeIf { it.isNotEmpty() }?.let {
+            args += listOf("-metadata", "album=$it")
+        }
+        spec.delivery.metadataTrack?.trim()?.takeIf { it.isNotEmpty() }?.let {
+            args += listOf("-metadata", "track=$it")
+        }
     }
 
     private fun formatSeconds(ms: Long): String {

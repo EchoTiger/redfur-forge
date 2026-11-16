@@ -1,6 +1,7 @@
 package com.fissal.forge
 
 import android.app.Application
+import com.fissal.forge.auth.SiteAuthVault
 import com.fissal.forge.data.local.ForgeDatabase
 import com.fissal.forge.data.settings.ForgeSettingsRepository
 import com.fissal.forge.delivery.ClipboardExportManager
@@ -27,6 +28,8 @@ class ForgeApplication : Application() {
         private set
     lateinit var settingsRepository: ForgeSettingsRepository
         private set
+    lateinit var siteAuthVault: SiteAuthVault
+        private set
     lateinit var binaryManager: NativeBinaryManager
         private set
     lateinit var probeEngine: MediaProbeEngine
@@ -52,11 +55,12 @@ class ForgeApplication : Application() {
         super.onCreate()
         database = ForgeDatabase.getInstance(this)
         settingsRepository = ForgeSettingsRepository(this)
+        siteAuthVault = SiteAuthVault(this)
         binaryManager = NativeBinaryManager(this)
         probeEngine = MediaProbeEngine(this, binaryManager)
         imageRawEngine = ImageRawEngine(this)
         ffmpegEngine = FFmpegCliEngine(this, binaryManager)
-        ytDlpEngine = YtDlpEngine(binaryManager)
+        ytDlpEngine = YtDlpEngine(binaryManager, siteAuthVault)
         mediaStoreExporter = MediaStoreExporter(this)
         clipboardExportManager = ClipboardExportManager(this)
         appUpdateManager = AppUpdateManager(this)
@@ -72,8 +76,14 @@ class ForgeApplication : Application() {
             imageRawEngine = imageRawEngine,
             mediaStoreExporter = mediaStoreExporter,
             clipboardExportManager = clipboardExportManager,
-            deviceCapabilities = deviceCapabilities
+            deviceCapabilities = deviceCapabilities,
+            siteAuthVault = siteAuthVault
         )
+
+        // Sweep any leftover ephemeral cookie files on cold start before launching yt-dlp jobs
+        appScope.launch {
+            runCatching { siteAuthVault.sweepStaleTempCookieFiles() }
+        }
 
         // Warm up yt-dlp/python/ffmpeg extraction asynchronously on IO without blocking cold start
         appScope.launch {

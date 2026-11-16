@@ -104,7 +104,8 @@ data class LinkItemSettings(
     val scopeBadge: String? = null,
     val sponsorBlockCategories: Set<SponsorBlockCategory> = emptySet(),
     val siteConnectionId: String? = null,
-    val splitByChapters: Boolean = false
+    val splitByChapters: Boolean = false,
+    val silenceSkip: SilenceSkipSpec = SilenceSkipSpec()
 ) {
     /**
      * Resolves active SponsorBlock categories, preserving legacy boolean [sponsorBlock] behavior
@@ -134,6 +135,8 @@ data class LinkItemSettings(
             val mbLabel = if (mb % 1.0 == 0.0) mb.toInt().toString() else String.format("%.1f", mb)
             parts += if (mode == DownloadMode.AUDIO_ONLY) "≤ ${mbLabel}MB" else "$tierTag ≤ ${mbLabel}MB"
         }
+        if (splitByChapters) parts += "Chapters"
+        if (silenceSkip.enabled) parts += "Silence Skip"
         return parts.joinToString(" • ")
     }
 }
@@ -156,7 +159,10 @@ data class ResolvedLinkChipItem(
     val isExpanded: Boolean = false,
     val errorHint: String? = null,
     val userCustomized: Boolean = false,
-    val chapters: List<ChapterTrackItem> = emptyList()
+    val chapters: List<ChapterTrackItem> = emptyList(),
+    val authRequiredReason: String? = null,
+    val authIsPaywall: Boolean = false,
+    val authServiceId: String? = null
 ) {
     val selectedTrackCount: Int
         get() = tracks.count { it.selected }

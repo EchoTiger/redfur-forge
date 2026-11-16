@@ -6,6 +6,7 @@ import android.content.pm.PackageManager
 import android.net.Uri
 import android.os.Build
 import android.os.Bundle
+import android.widget.Toast
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.compose.setContent
@@ -55,7 +56,9 @@ import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
@@ -63,8 +66,11 @@ import androidx.compose.ui.res.painterResource
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.core.content.ContextCompat
+import com.fissal.forge.auth.ServiceDescriptor
 import com.fissal.forge.ui.ForgeViewModel
 import com.fissal.forge.ui.MainTab
+import com.fissal.forge.ui.components.AuthRequiredPromptDialog
+import com.fissal.forge.ui.components.AuthWebViewDialog
 import com.fissal.forge.ui.screens.HubScreen
 import com.fissal.forge.ui.screens.QueueScreen
 import com.fissal.forge.ui.screens.SettingsScreen
@@ -115,6 +121,9 @@ class MainActivity : ComponentActivity() {
                 val cacheSizeBytes by viewModel.cacheSizeBytes.collectAsState()
                 val statusBanner by viewModel.statusBanner.collectAsState()
                 val appUpdateState by viewModel.appUpdateState.collectAsState()
+                val siteConnections by viewModel.siteConnections.collectAsState()
+                val checkingServiceId by viewModel.checkingServiceId.collectAsState()
+                val authPrompt by viewModel.authPrompt.collectAsState()
                 val deviceCapabilities = viewModel.deviceCapabilities
 
                 val snackbarHostState = remember { SnackbarHostState() }
@@ -188,6 +197,23 @@ class MainActivity : ComponentActivity() {
                             }
                         }
                         viewModel.openStudioForUris(uris, fromShareIntent = false)
+                    }
+                }
+
+                var activeAuthWebViewSession by remember {
+                    mutableStateOf<Triple<ServiceDescriptor, String?, String?>?>(null)
+                }
+                var pendingAuthCookieImport by remember {
+                    mutableStateOf<Triple<ServiceDescriptor, String?, String?>?>(null)
+                }
+                val authCookiesPickerLauncher = rememberLauncherForActivityResult(
+                    contract = ActivityResultContracts.OpenDocument()
+                ) { uri ->
+                    val target = pendingAuthCookieImport
+                    pendingAuthCookieImport = null
+                    if (uri != null && target != null) {
+                        viewModel.importCookiesForService(target.first, uri, target.second, target.third)
+                        activeAuthWebViewSession = null
                     }
                 }
 
@@ -332,6 +358,12 @@ class MainActivity : ComponentActivity() {
                                         onUpdateChipSettings = viewModel::updateLinkChipSettings,
                                         onTogglePlaylistTrack = viewModel::togglePlaylistTrack,
                                         onSetAllPlaylistTracks = viewModel::setAllPlaylistTracks,
+                                        onSetSplitByChapters = viewModel::setSplitByChapters,
+                                        onToggleChapterTrack = viewModel::toggleChapterTrack,
+                                        onSetAllChapterTracks = viewModel::setAllChapterTracks,
+                                        onSetBulkChapterMode = viewModel::setBulkChapterMode,
+                                        onToggleChapterTrackModeOverride = viewModel::toggleChapterTrackModeOverride,
+                                        onSetChapterTrackAudioFormat = viewModel::setChapterTrackAudioFormat,
                                         onApplyToSameType = viewModel::applySettingsToSameType,
                                         onApplyToSameSite = viewModel::applySettingsToSameSite,
                                         onApplyToAllLinks = viewModel::applySettingsToAllLinks,
@@ -340,7 +372,8 @@ class MainActivity : ComponentActivity() {
                                         onPickFilesClick = { multiFilePicker.launch(arrayOf("*/*")) },
                                         onOpenQueueClick = { viewModel.selectTab(MainTab.QUEUE) },
                                         onCancelAll = viewModel::cancelAllJobs,
-                                        onRemovePlaylistGroup = viewModel::removePlaylistGroup
+                                        onRemovePlaylistGroup = viewModel::removePlaylistGroup,
+                                        onPromptSignInForChip = viewModel::promptSignInForChip
                                     )
                                     MainTab.QUEUE -> QueueScreen(
                                         jobs = jobs,
@@ -363,10 +396,20 @@ class MainActivity : ComponentActivity() {
                                         cacheSizeBytes = cacheSizeBytes,
                                         appUpdateState = appUpdateState,
                                         deviceCapabilities = deviceCapabilities,
+                                        siteConnections = siteConnections,
+                                        checkingServiceId = checkingServiceId,
                                         onCheckAppUpdate = viewModel::checkForAppUpdates,
                                         onStartAppUpdate = { viewModel.startAppUpdate(autoInstallAfter = true) },
                                         onCancelAppUpdate = viewModel::cancelAppUpdate,
                                         onInstallAppUpdate = { launchOrRequestInstall() },
+                                        onCaptureWebViewSession = { service, ua, visitedUrls ->
+                                            viewModel.completeWebViewSignIn(service, ua, visitedUrls)
+                                        },
+                                        onImportCookiesTxt = { service, uri ->
+                                            viewModel.importCookiesForService(service, uri)
+                                        },
+                                        onCheckSiteConnection = viewModel::checkSiteConnection,
+                                        onRemoveSiteConnection = viewModel::removeSiteConnection,
                                         onUpdateSettings = viewModel::updateSettings,
                                         onUpdateYtDlp = viewModel::updateYtDlp,
                                         onClearCache = viewModel::clearCache
@@ -374,6 +417,54 @@ class MainActivity : ComponentActivity() {
                                 }
                             }
                         }
+                    }
+
+                    if (authPrompt != null && activeAuthWebViewSession == null) {
+                        val currentPrompt = authPrompt!!
+                        AuthRequiredPromptDialog(
+                            service = currentPrompt.service,
+                            targetUrl = currentPrompt.targetUrl,
+                            reason = currentPrompt.reason,
+                            isPaywallOrSubscription = currentPrompt.isPaywallOrSubscription,
+                            onDismiss = viewModel::dismissAuthPrompt,
+                            onSignInWebView = { resolvedService ->
+                                activeAuthWebViewSession = Triple(
+                                    resolvedService,
+                                    currentPrompt.retryCleanUrl,
+                                    currentPrompt.retryJobId
+                                )
+                            },
+                            onImportCookiesTxt = { resolvedService ->
+                                pendingAuthCookieImport = Triple(
+                                    resolvedService,
+                                    currentPrompt.retryCleanUrl,
+                                    currentPrompt.retryJobId
+                                )
+                                authCookiesPickerLauncher.launch(arrayOf("text/plain", "text/*", "*/*"))
+                            },
+                            onOpenExternalApp = { targetUrl ->
+                                runCatching {
+                                    startActivity(Intent(Intent.ACTION_VIEW, Uri.parse(targetUrl)))
+                                }.onFailure {
+                                    Toast.makeText(this@MainActivity, "No app installed to open link", Toast.LENGTH_SHORT).show()
+                                }
+                            }
+                        )
+                    }
+
+                    activeAuthWebViewSession?.let { (service, retryUrl, retryJobId) ->
+                        AuthWebViewDialog(
+                            service = service,
+                            onDismiss = { activeAuthWebViewSession = null },
+                            onCaptureSession = { resolvedService, ua, visitedUrls ->
+                                activeAuthWebViewSession = null
+                                viewModel.completeWebViewSignIn(resolvedService, ua, visitedUrls, retryUrl, retryJobId)
+                            },
+                            onImportCookiesClick = { resolvedService ->
+                                pendingAuthCookieImport = Triple(resolvedService, retryUrl, retryJobId)
+                                authCookiesPickerLauncher.launch(arrayOf("text/plain", "text/*", "*/*"))
+                            }
+                        )
                     }
                 }
             }

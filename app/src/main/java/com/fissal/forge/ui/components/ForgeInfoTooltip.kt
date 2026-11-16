@@ -172,9 +172,9 @@ private fun presentationFor(topic: SettingTopic): TopicPresentation = when (topi
         descriptor = SettingDescriptor(
             topic = topic,
             title = "SponsorBlock Segment Skip",
-            whatItDoes = "Checks community-submitted chapter timestamps during Relay downloads and removes built-in sponsor reads, intros, or reminder segments automatically.",
-            recommendedDefault = "On for podcasts, essays, and commentary videos; optional for music.",
-            tradeOffs = "Keeps downloaded videos concise without manual editing, though brand-new uploads may lack timestamps or trim a beat early."
+            whatItDoes = "Checks community-submitted timestamps during Relay downloads and lets you pick exact categories to remove automatically: Sponsors, Self-Promo, Interaction Reminders, Intros, Endcards / Credits, Previews / Recaps, and Non-Music Sections.",
+            recommendedDefault = "Enable Sponsors (plus Self-Promo or Interaction Reminders) for podcasts, essays, and commentary videos; select Non-Music Sections for music videos.",
+            tradeOffs = "Keeps downloaded videos concise without manual editing, though brand-new uploads may lack community timestamps yet or trim a beat early near chapter transitions."
         ),
         domain = EngineDomain.RELAY,
         domainLabel = "Relay Intake"
@@ -183,9 +183,9 @@ private fun presentationFor(topic: SettingTopic): TopicPresentation = when (topi
         descriptor = SettingDescriptor(
             topic = topic,
             title = "Trim Dead Air / Silence",
-            whatItDoes = "Detects prolonged quiet gaps in audio or video tracks and tightens them automatically during processing.",
-            recommendedDefault = "On for lectures, voice memos, and spoken podcasts; Off for music and cinematic clips.",
-            tradeOffs = "Makes spoken recordings snappier and slightly smaller, while stripping intentional quiet pauses or soft fade-outs in music."
+            whatItDoes = "Detects silent pauses using threshold presets (Gentle -45dB, Standard -38dB, Tight -30dB) and a minimum pause duration (0.4s–1.0s), tightening gaps while keeping ~80ms speech-tail padding so words aren't clipped and automatically keeping video frames and audio synchronized on video clips.",
+            recommendedDefault = "Standard (-38dB) with a 0.6s minimum pause for lectures, voice memos, and spoken podcasts; Off for music and cinematic clips.",
+            tradeOffs = "Makes spoken recordings snappier with zero A/V drift, while aggressive Tight (-30dB) presets can trim soft breaths, musical fade-outs, or intentional quiet pauses."
         ),
         domain = EngineDomain.FORGE,
         domainLabel = "Local Forge"

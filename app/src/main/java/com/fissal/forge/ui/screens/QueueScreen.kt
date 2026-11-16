@@ -348,6 +348,8 @@ private fun PlaylistGroupCard(
 
     val totalInBytes = group.allGroupJobs.sumOf { it.inputBytes }
     val totalOutBytes = group.allGroupJobs.sumOf { it.outputBytes }
+    val isChapterGroup = group.groupId.startsWith("ch_")
+    val groupKindLabel = if (isChapterGroup) "Chapters" else "Playlist"
     val groupDomain = when {
         group.allGroupJobs.any { it.statusEnum == JobStatus.PROCESSING } -> EngineDomain.FORGE
         activeCount > 0 -> EngineDomain.RELAY
@@ -364,7 +366,7 @@ private fun PlaylistGroupCard(
         Column(
             verticalArrangement = Arrangement.spacedBy(10.dp)
         ) {
-            // Playlist Header Row
+            // Playlist / Chapter Group Header Row
             Row(
                 modifier = Modifier
                     .fillMaxWidth()
@@ -407,7 +409,7 @@ private fun PlaylistGroupCard(
                     )
                     Text(
                         text = buildString {
-                            append("Playlist • $completedCount/$totalCount done")
+                            append("$groupKindLabel • $completedCount/$totalCount done")
                             if (activeCount > 0) append(" • $activeCount active")
                             if (failedCount > 0) append(" • $failedCount failed")
                             if (totalOutBytes > 0L) append(" • ${formatQueueBytes(totalOutBytes)}")
@@ -435,7 +437,7 @@ private fun PlaylistGroupCard(
                 IconButton(onClick = { expanded = !expanded }, modifier = Modifier.size(32.dp)) {
                     Icon(
                         imageVector = if (expanded) Icons.Rounded.ExpandLess else Icons.Rounded.ExpandMore,
-                        contentDescription = "Expand playlist tracks",
+                        contentDescription = "Expand tracks",
                         tint = SecundaSilver
                     )
                 }
@@ -456,7 +458,7 @@ private fun PlaylistGroupCard(
                 trackColor = SlateOutline
             )
 
-            // Playlist-wide controls
+            // Group-wide controls
             Row(
                 modifier = Modifier.fillMaxWidth(),
                 horizontalArrangement = Arrangement.spacedBy(8.dp),
@@ -470,7 +472,11 @@ private fun PlaylistGroupCard(
                     ) {
                         Icon(Icons.Rounded.Close, contentDescription = null, modifier = Modifier.size(14.dp), tint = AmberActive)
                         Spacer(Modifier.width(4.dp))
-                        Text("Cancel Playlist", style = MaterialTheme.typography.labelSmall, color = AmberActive)
+                        Text(
+                            if (isChapterGroup) "Cancel Chapters" else "Cancel Playlist",
+                            style = MaterialTheme.typography.labelSmall,
+                            color = AmberActive
+                        )
                     }
                 }
                 if (failedCount > 0 || canceledCount > 0) {
@@ -492,7 +498,10 @@ private fun PlaylistGroupCard(
                 ) {
                     Icon(Icons.Rounded.DeleteOutline, contentDescription = null, modifier = Modifier.size(16.dp))
                     Spacer(Modifier.width(4.dp))
-                    Text("Remove Playlist", style = MaterialTheme.typography.labelMedium)
+                    Text(
+                        if (isChapterGroup) "Remove Chapters" else "Remove Playlist",
+                        style = MaterialTheme.typography.labelMedium
+                    )
                 }
             }
 

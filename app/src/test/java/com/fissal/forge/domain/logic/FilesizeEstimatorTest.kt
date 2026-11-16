@@ -467,4 +467,69 @@ class FilesizeEstimatorTest {
         val batch = FilesizeEstimator.estimateBatchLinks(listOf(playlistChip, chapterChip, unresolved))!!
         assertEquals(audioEst.estimatedBytes + splitEst1080.estimatedBytes, batch.estimatedBytes)
     }
+
+    @Test
+    fun chapterTrackRespectsPerTrackCustomModeAndZeroSelectionReturnsNull() {
+        val chapters = listOf(
+            ChapterTrackItem(
+                index = 1,
+                title = "Intro Audio",
+                startMs = 0L,
+                endMs = 120_000L,
+                selected = true,
+                customSettings = LinkItemSettings(mode = DownloadMode.AUDIO_ONLY, audioFormat = "mp3")
+            ),
+            ChapterTrackItem(
+                index = 2,
+                title = "Main Video",
+                startMs = 120_000L,
+                endMs = 240_000L,
+                selected = true,
+                customSettings = LinkItemSettings(mode = DownloadMode.VIDEO_MP4, maxHeight = 1080)
+            )
+        )
+        val mixedChip = ResolvedLinkChipItem(
+            cleanUrl = "https://youtube.com/watch?v=mixed",
+            host = "youtube.com",
+            resolveState = LinkResolveState.RESOLVED,
+            durationSec = 240L,
+            chapters = chapters,
+            settings = LinkItemSettings(mode = DownloadMode.VIDEO_MP4, maxHeight = 1080, splitByChapters = true)
+        )
+
+        val audioOverrideEst = FilesizeEstimator.estimateChapterTrack(mixedChip, chapters[0])!!
+        val videoOverrideEst = FilesizeEstimator.estimateChapterTrack(mixedChip, chapters[1])!!
+        // 120s @ 192 kbps mp3 (~2.88 MB) should be dramatically smaller than 120s 1080p H.264 video
+        assertTrue(audioOverrideEst.estimatedBytes < 3_500_000L)
+        assertTrue(videoOverrideEst.estimatedBytes > audioOverrideEst.estimatedBytes * 3L)
+
+        // Switching customSettings audioFormat to FLAC increases audio chapter estimate vs OPUS
+        val opusChapterEst = FilesizeEstimator.estimateChapterTrack(
+            mixedChip,
+            chapters[0].copy(customSettings = LinkItemSettings(mode = DownloadMode.AUDIO_ONLY, audioFormat = "opus"))
+        )!!
+        val flacChapterEst = FilesizeEstimator.estimateChapterTrack(
+            mixedChip,
+            chapters[0].copy(customSettings = LinkItemSettings(mode = DownloadMode.AUDIO_ONLY, audioFormat = "flac"))
+        )!!
+        assertTrue(opusChapterEst.estimatedBytes < audioOverrideEst.estimatedBytes)
+        assertTrue(audioOverrideEst.estimatedBytes < flacChapterEst.estimatedBytes)
+
+        // Zero selected chapters or zero selected playlist tracks must return null (even when targetSizeMb is set)
+        val zeroSelectedChapters = mixedChip.copy(
+            chapters = chapters.map { it.copy(selected = false) },
+            settings = mixedChip.settings.copy(targetSizeMb = 10.0)
+        )
+        assertNull(FilesizeEstimator.estimateLinkChip(zeroSelectedChapters))
+
+        val zeroSelectedPlaylist = ResolvedLinkChipItem(
+            cleanUrl = "https://youtube.com/playlist?list=PL_EMPTY",
+            host = "youtube.com",
+            resolveState = LinkResolveState.RESOLVED,
+            detectedKind = DetectedLinkKind.PLAYLIST,
+            tracks = listOf(PlaylistTrackItem(1, "t1", "Track 1", durationSec = 180L, selected = false)),
+            settings = LinkItemSettings(mode = DownloadMode.AUDIO_ONLY, playlistSingleOnly = false, targetSizeMb = 10.0)
+        )
+        assertNull(FilesizeEstimator.estimateLinkChip(zeroSelectedPlaylist))
+    }
 }

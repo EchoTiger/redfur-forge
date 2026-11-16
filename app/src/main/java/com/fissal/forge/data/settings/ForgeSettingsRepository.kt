@@ -7,9 +7,12 @@ import androidx.datastore.preferences.core.booleanPreferencesKey
 import androidx.datastore.preferences.core.edit
 import androidx.datastore.preferences.core.intPreferencesKey
 import androidx.datastore.preferences.core.stringPreferencesKey
+import androidx.datastore.preferences.core.stringSetPreferencesKey
 import androidx.datastore.preferences.preferencesDataStore
 import com.fissal.forge.domain.model.AspectPreset
 import com.fissal.forge.domain.model.DownloadMode
+import com.fissal.forge.domain.model.SilenceSkipSpec
+import com.fissal.forge.domain.model.SponsorBlockCategory
 import com.fissal.forge.domain.model.VideoCodecChoice
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.map
@@ -41,13 +44,56 @@ data class ForgeSettings(
     val filenameSuffix: String = "_forge",
     val autoCheckAppUpdates: Boolean = true,
     val autoDownloadAppUpdates: Boolean = false,
-    val dismissedUpdateTag: String = ""
+    val dismissedUpdateTag: String = "",
+    val defaultSponsorBlockCategories: Set<SponsorBlockCategory> = emptySet(),
+    val defaultSilenceSkip: SilenceSkipSpec = SilenceSkipSpec()
 )
 
 class ForgeSettingsRepository(private val appContext: Context) {
 
-    val settingsFlow: Flow<ForgeSettings> = appContext.forgeDataStore.data.map { prefs ->
-        ForgeSettings(
+    val settingsFlow: Flow<ForgeSettings> = appContext.forgeDataStore.data.map(::decodeSettings)
+
+    suspend fun update(transform: (ForgeSettings) -> ForgeSettings) {
+        appContext.forgeDataStore.edit { prefs ->
+            val current = decodeSettings(prefs)
+            val next = transform(current)
+            prefs[KEY_DOWNLOAD_MODE] = next.defaultDownloadMode.name
+            prefs[KEY_MAX_VIDEO_HEIGHT] = next.defaultMaxVideoHeight
+            prefs[KEY_AUDIO_FORMAT] = next.defaultAudioFormat
+            prefs[KEY_VIDEO_EXT] = next.defaultVideoExt
+            prefs[KEY_VIDEO_CODEC] = next.defaultVideoCodec.name
+            prefs[KEY_VIDEO_CRF] = next.defaultVideoCrf
+            prefs[KEY_IMAGE_FORMAT] = next.defaultImageFormat
+            prefs[KEY_IMAGE_QUALITY] = next.defaultImageQuality
+            prefs[KEY_TARGET_SIZE_MB] = next.defaultTargetSizeMb
+            prefs[KEY_CROP_PRESET] = next.defaultCropPreset.name
+            prefs[KEY_RAW_HALF_FAST] = next.rawHalfSizeFast
+            prefs[KEY_PLAYLIST_SINGLE] = next.playlistSingleOnly
+            prefs[KEY_USE_ARIA2C] = next.useAria2c
+            prefs[KEY_STRIP_TRACKING] = next.stripUrlTracking
+            prefs[KEY_EMBED_META] = next.embedDownloadMetadata
+            prefs[KEY_EMBED_THUMB] = next.embedDownloadThumbnail
+            prefs[KEY_STRIP_META_SAVE] = next.stripMetadataOnSave
+            prefs[KEY_STRIP_META_CLIP] = next.stripMetadataOnClipboard
+            prefs[KEY_AUTO_COPY_SHARE] = next.autoCopyOnShareEdit
+            prefs[KEY_MAX_DOWNLOADS] = next.maxConcurrentDownloads.coerceIn(1, 5)
+            prefs[KEY_COMPUTE_SLOTS] = next.computeSlotsOverride.coerceIn(0, 4)
+            prefs[KEY_SUFFIX] = next.filenameSuffix
+            prefs[KEY_AUTO_CHECK_UPDATES] = next.autoCheckAppUpdates
+            prefs[KEY_AUTO_DOWNLOAD_UPDATES] = next.autoDownloadAppUpdates
+            prefs[KEY_DISMISSED_UPDATE_TAG] = next.dismissedUpdateTag
+            prefs[KEY_DEFAULT_SB_CATEGORIES] = next.defaultSponsorBlockCategories.map { it.name }.toSet()
+            prefs[KEY_DEFAULT_SILENCE_ENABLED] = next.defaultSilenceSkip.enabled
+            prefs[KEY_DEFAULT_SILENCE_DB] = next.defaultSilenceSkip.thresholdDb.coerceIn(-90, -10)
+            prefs[KEY_DEFAULT_SILENCE_MS] = next.defaultSilenceSkip.minSilenceMs.coerceIn(100, 10_000)
+        }
+    }
+
+    private fun decodeSettings(prefs: Preferences): ForgeSettings {
+        val sbCategories = (prefs[KEY_DEFAULT_SB_CATEGORIES] ?: emptySet())
+            .mapNotNull { raw -> runCatching { SponsorBlockCategory.valueOf(raw) }.getOrNull() }
+            .toSet()
+        return ForgeSettings(
             defaultDownloadMode = runCatching {
                 DownloadMode.valueOf(prefs[KEY_DOWNLOAD_MODE] ?: DownloadMode.VIDEO_MP4.name)
             }.getOrDefault(DownloadMode.VIDEO_MP4),
@@ -78,72 +124,14 @@ class ForgeSettingsRepository(private val appContext: Context) {
             filenameSuffix = prefs[KEY_SUFFIX] ?: "_forge",
             autoCheckAppUpdates = prefs[KEY_AUTO_CHECK_UPDATES] ?: true,
             autoDownloadAppUpdates = prefs[KEY_AUTO_DOWNLOAD_UPDATES] ?: false,
-            dismissedUpdateTag = prefs[KEY_DISMISSED_UPDATE_TAG].orEmpty()
-        )
-    }
-
-    suspend fun update(transform: (ForgeSettings) -> ForgeSettings) {
-        appContext.forgeDataStore.edit { prefs ->
-            val current = ForgeSettings(
-                defaultDownloadMode = runCatching {
-                    DownloadMode.valueOf(prefs[KEY_DOWNLOAD_MODE] ?: DownloadMode.VIDEO_MP4.name)
-                }.getOrDefault(DownloadMode.VIDEO_MP4),
-                defaultMaxVideoHeight = prefs[KEY_MAX_VIDEO_HEIGHT] ?: 1080,
-                defaultAudioFormat = prefs[KEY_AUDIO_FORMAT] ?: "mp3",
-                defaultVideoExt = prefs[KEY_VIDEO_EXT] ?: "mp4",
-                defaultVideoCodec = runCatching {
-                    VideoCodecChoice.valueOf(prefs[KEY_VIDEO_CODEC] ?: VideoCodecChoice.H264.name)
-                }.getOrDefault(VideoCodecChoice.H264),
-                defaultVideoCrf = prefs[KEY_VIDEO_CRF] ?: 23,
-                defaultImageFormat = prefs[KEY_IMAGE_FORMAT] ?: "jpg",
-                defaultImageQuality = prefs[KEY_IMAGE_QUALITY] ?: 88,
-                defaultTargetSizeMb = prefs[KEY_TARGET_SIZE_MB] ?: 8,
-                defaultCropPreset = runCatching {
-                    AspectPreset.valueOf(prefs[KEY_CROP_PRESET] ?: AspectPreset.AUTO_CLOSEST.name)
-                }.getOrDefault(AspectPreset.AUTO_CLOSEST),
-                rawHalfSizeFast = prefs[KEY_RAW_HALF_FAST] ?: false,
-                playlistSingleOnly = prefs[KEY_PLAYLIST_SINGLE] ?: true,
-                useAria2c = prefs[KEY_USE_ARIA2C] ?: true,
-                stripUrlTracking = prefs[KEY_STRIP_TRACKING] ?: true,
-                embedDownloadMetadata = prefs[KEY_EMBED_META] ?: true,
-                embedDownloadThumbnail = prefs[KEY_EMBED_THUMB] ?: true,
-                stripMetadataOnSave = prefs[KEY_STRIP_META_SAVE] ?: false,
-                stripMetadataOnClipboard = prefs[KEY_STRIP_META_CLIP] ?: true,
-                autoCopyOnShareEdit = prefs[KEY_AUTO_COPY_SHARE] ?: false,
-                maxConcurrentDownloads = (prefs[KEY_MAX_DOWNLOADS] ?: 3).coerceIn(1, 5),
-                computeSlotsOverride = (prefs[KEY_COMPUTE_SLOTS] ?: 0).coerceIn(0, 4),
-                filenameSuffix = prefs[KEY_SUFFIX] ?: "_forge",
-                autoCheckAppUpdates = prefs[KEY_AUTO_CHECK_UPDATES] ?: true,
-                autoDownloadAppUpdates = prefs[KEY_AUTO_DOWNLOAD_UPDATES] ?: false,
-                dismissedUpdateTag = prefs[KEY_DISMISSED_UPDATE_TAG].orEmpty()
+            dismissedUpdateTag = prefs[KEY_DISMISSED_UPDATE_TAG].orEmpty(),
+            defaultSponsorBlockCategories = sbCategories,
+            defaultSilenceSkip = SilenceSkipSpec(
+                enabled = prefs[KEY_DEFAULT_SILENCE_ENABLED] ?: false,
+                thresholdDb = (prefs[KEY_DEFAULT_SILENCE_DB] ?: -38).coerceIn(-90, -10),
+                minSilenceMs = (prefs[KEY_DEFAULT_SILENCE_MS] ?: 600).coerceIn(100, 10_000)
             )
-            val next = transform(current)
-            prefs[KEY_DOWNLOAD_MODE] = next.defaultDownloadMode.name
-            prefs[KEY_MAX_VIDEO_HEIGHT] = next.defaultMaxVideoHeight
-            prefs[KEY_AUDIO_FORMAT] = next.defaultAudioFormat
-            prefs[KEY_VIDEO_EXT] = next.defaultVideoExt
-            prefs[KEY_VIDEO_CODEC] = next.defaultVideoCodec.name
-            prefs[KEY_VIDEO_CRF] = next.defaultVideoCrf
-            prefs[KEY_IMAGE_FORMAT] = next.defaultImageFormat
-            prefs[KEY_IMAGE_QUALITY] = next.defaultImageQuality
-            prefs[KEY_TARGET_SIZE_MB] = next.defaultTargetSizeMb
-            prefs[KEY_CROP_PRESET] = next.defaultCropPreset.name
-            prefs[KEY_RAW_HALF_FAST] = next.rawHalfSizeFast
-            prefs[KEY_PLAYLIST_SINGLE] = next.playlistSingleOnly
-            prefs[KEY_USE_ARIA2C] = next.useAria2c
-            prefs[KEY_STRIP_TRACKING] = next.stripUrlTracking
-            prefs[KEY_EMBED_META] = next.embedDownloadMetadata
-            prefs[KEY_EMBED_THUMB] = next.embedDownloadThumbnail
-            prefs[KEY_STRIP_META_SAVE] = next.stripMetadataOnSave
-            prefs[KEY_STRIP_META_CLIP] = next.stripMetadataOnClipboard
-            prefs[KEY_AUTO_COPY_SHARE] = next.autoCopyOnShareEdit
-            prefs[KEY_MAX_DOWNLOADS] = next.maxConcurrentDownloads.coerceIn(1, 5)
-            prefs[KEY_COMPUTE_SLOTS] = next.computeSlotsOverride.coerceIn(0, 4)
-            prefs[KEY_SUFFIX] = next.filenameSuffix
-            prefs[KEY_AUTO_CHECK_UPDATES] = next.autoCheckAppUpdates
-            prefs[KEY_AUTO_DOWNLOAD_UPDATES] = next.autoDownloadAppUpdates
-            prefs[KEY_DISMISSED_UPDATE_TAG] = next.dismissedUpdateTag
-        }
+        )
     }
 
     companion object {
@@ -172,5 +160,9 @@ class ForgeSettingsRepository(private val appContext: Context) {
         private val KEY_AUTO_CHECK_UPDATES = booleanPreferencesKey("auto_check_app_updates")
         private val KEY_AUTO_DOWNLOAD_UPDATES = booleanPreferencesKey("auto_download_app_updates")
         private val KEY_DISMISSED_UPDATE_TAG = stringPreferencesKey("dismissed_update_tag")
+        private val KEY_DEFAULT_SB_CATEGORIES = stringSetPreferencesKey("default_sb_categories")
+        private val KEY_DEFAULT_SILENCE_ENABLED = booleanPreferencesKey("default_silence_enabled")
+        private val KEY_DEFAULT_SILENCE_DB = intPreferencesKey("default_silence_db")
+        private val KEY_DEFAULT_SILENCE_MS = intPreferencesKey("default_silence_ms")
     }
 }

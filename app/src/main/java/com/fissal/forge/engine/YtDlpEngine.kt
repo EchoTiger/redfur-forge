@@ -1,9 +1,12 @@
 package com.fissal.forge.engine
 
+import com.fissal.forge.auth.AuthErrorClassifier
+import com.fissal.forge.auth.SiteAuthVault
 import com.fissal.forge.domain.logic.YtDlpJsonParser
 import com.fissal.forge.domain.model.DownloadMode
 import com.fissal.forge.domain.model.DownloadSpec
 import com.fissal.forge.domain.model.ResolvedUrlMetadata
+import com.fissal.forge.domain.model.SponsorBlockCategory
 import com.yausername.youtubedl_android.YoutubeDL
 import com.yausername.youtubedl_android.YoutubeDLRequest
 import kotlinx.coroutines.CancellationException
@@ -15,41 +18,66 @@ import java.io.IOException
 import kotlin.coroutines.coroutineContext
 
 /**
- * Executes yt-dlp metadata inspection and isolated per-job downloads with aria2c acceleration.
+ * Executes yt-dlp metadata inspection and isolated per-job downloads with aria2c acceleration
+ * and ephemeral Keystore-backed cookie materialization.
  */
-class YtDlpEngine(private val binaryManager: NativeBinaryManager) {
+class YtDlpEngine(
+    private val binaryManager: NativeBinaryManager,
+    private val authVault: SiteAuthVault? = null
+) {
 
     suspend fun resolveMetadata(
         url: String,
-        cancelKey: String
+        cancelKey: String,
+        siteConnectionId: String? = null
     ): ResolvedUrlMetadata = withContext(Dispatchers.IO) {
         binaryManager.ensureInitialized()
-        val request = YoutubeDLRequest(url).apply {
-            addOption("--flat-playlist")
-            addOption("--dump-single-json")
-            addOption("--no-warnings")
-            addOption("--ignore-errors")
-            addOption("--socket-timeout", "12")
-        }
-
-        val processId = "resolve_$cancelKey"
-        val cancelHandle = coroutineContext.job.invokeOnCompletion { cause ->
-            if (cause is CancellationException) {
-                YoutubeDL.getInstance().destroyProcessById(processId)
+        withAuthCookies(url, siteConnectionId) { cookieFile, userAgent ->
+            val request = YoutubeDLRequest(url).apply {
+                addOption("--flat-playlist")
+                addOption("--dump-single-json")
+                addOption("--no-warnings")
+                addOption("--ignore-errors")
+                addOption("--socket-timeout", "12")
+                if (cookieFile != null) {
+                    addOption("--cookies", cookieFile.absolutePath)
+                    userAgent?.takeIf { it.isNotBlank() }?.let { addOption("--user-agent", it) }
+                }
             }
-        }
 
-        val response = try {
-            YoutubeDL.getInstance().execute(request, processId)
-        } finally {
-            cancelHandle.dispose()
-        }
+            val processId = "resolve_$cancelKey"
+            val cancelHandle = coroutineContext.job.invokeOnCompletion { cause ->
+                if (cause is CancellationException) {
+                    YoutubeDL.getInstance().destroyProcessById(processId)
+                }
+            }
 
-        val outText = response.out.orEmpty()
-        if (outText.isBlank()) {
-            throw IOException(response.err?.lineSequence()?.firstOrNull { it.isNotBlank() } ?: "Empty metadata response")
+            val response = try {
+                YoutubeDL.getInstance().execute(request, processId)
+            } catch (t: Throwable) {
+                if (t is CancellationException) throw t
+                val combinedErr = listOfNotNull(t.message, t.cause?.message).joinToString("\n")
+                AuthErrorClassifier.classifyYtDlpError(
+                    url = url,
+                    rawStderr = combinedErr,
+                    customDomains = authVault?.connectedCustomDomains().orEmpty()
+                )?.let { throw it }
+                throw t
+            } finally {
+                cancelHandle.dispose()
+            }
+
+            val outText = response.out.orEmpty()
+            if (outText.isBlank()) {
+                AuthErrorClassifier.classifyYtDlpError(
+                    url = url,
+                    rawStderr = response.err,
+                    customDomains = authVault?.connectedCustomDomains().orEmpty()
+                )?.let { throw it }
+                throw IOException(response.err?.lineSequence()?.firstOrNull { it.isNotBlank() } ?: "Empty metadata response")
+            }
+            YtDlpJsonParser.parse(url, outText)
         }
-        YtDlpJsonParser.parse(url, outText)
     }
 
     suspend fun download(
@@ -64,92 +92,146 @@ class YtDlpEngine(private val binaryManager: NativeBinaryManager) {
 
         val effectiveMaxHeight = listOfNotNull(spec.maxHeight, downloadHeightOverride).minOrNull()
 
-        val request = YoutubeDLRequest(spec.url).apply {
-            addOption("-o", "${workDir.absolutePath}/%(title).120B [%(id)s].%(ext)s")
-            addOption("--no-mtime")
-            addOption("--restrict-filenames")
-            if (spec.playlistItemIndex != null) {
-                addOption("--yes-playlist")
-                addOption("--playlist-items", spec.playlistItemIndex.toString())
-            } else if (spec.playlistSingleOnly) {
-                addOption("--no-playlist")
-            } else {
-                addOption("--yes-playlist")
-            }
-
-            if (spec.useAria2c) {
-                addOption("--downloader", "libaria2c.so")
-                addOption("--external-downloader-args", "aria2c:-x 8 -k 1M")
-            }
-
-            when (spec.mode) {
-                DownloadMode.VIDEO_MP4 -> {
-                    val format = if (effectiveMaxHeight != null) {
-                        "bv*[height<=$effectiveMaxHeight][ext=mp4]+ba[ext=m4a]/b[height<=$effectiveMaxHeight][ext=mp4]/bv*[height<=$effectiveMaxHeight]+ba/b[height<=$effectiveMaxHeight]/b"
-                    } else {
-                        "bv*[ext=mp4]+ba[ext=m4a]/b[ext=mp4]/bv*+ba/b"
-                    }
-                    addOption("-f", format)
-                    addOption("--merge-output-format", "mp4")
+        withAuthCookies(spec.url, spec.siteConnectionId) { cookieFile, userAgent ->
+            val request = YoutubeDLRequest(spec.url).apply {
+                addOption("-o", "${workDir.absolutePath}/%(title).120B [%(id)s].%(ext)s")
+                addOption("--no-mtime")
+                addOption("--restrict-filenames")
+                if (cookieFile != null) {
+                    addOption("--cookies", cookieFile.absolutePath)
+                    userAgent?.takeIf { it.isNotBlank() }?.let { addOption("--user-agent", it) }
                 }
-                DownloadMode.VIDEO_BEST_MKV -> {
-                    val format = if (effectiveMaxHeight != null) {
-                        "bv*[height<=$effectiveMaxHeight]+ba/b[height<=$effectiveMaxHeight]/b"
-                    } else {
-                        "bv*+ba/b"
-                    }
-                    addOption("-f", format)
-                    addOption("--merge-output-format", "mkv")
-                }
-                DownloadMode.AUDIO_ONLY -> {
-                    addOption("-x")
-                    addOption("--audio-format", spec.audioFormat)
-                    addOption("--audio-quality", "0")
-                }
-            }
 
-            if (spec.embedMetadata) {
-                addOption("--embed-metadata")
-            }
-            if (spec.embedThumbnail && spec.mode != DownloadMode.VIDEO_BEST_MKV) {
-                addOption("--embed-thumbnail")
-            }
-            val sponsorCategories = spec.effectiveSponsorBlockCategories
-            if (sponsorCategories.isNotEmpty()) {
-                addOption("--sponsorblock-remove", sponsorCategories.joinToString(",") { it.ytDlpKey })
-            }
-        }
-
-        val processId = "ytdlp_$jobId"
-        val cancelHandle = coroutineContext.job.invokeOnCompletion { cause ->
-            if (cause is CancellationException) {
-                YoutubeDL.getInstance().destroyProcessById(processId)
-            }
-        }
-
-        try {
-            YoutubeDL.getInstance().execute(request, processId) { progress, etaInSeconds, line ->
-                val pct = if (progress >= 0f) progress.coerceIn(0f, 99.5f) else 0f
-                val etaStr = if (etaInSeconds > 0L) " • ETA ${etaInSeconds}s" else ""
-                val status = if (line.contains("[Merger]", ignoreCase = true) || line.contains("[ExtractAudio]", ignoreCase = true)) {
-                    "Muxing streams..."
+                if (spec.playlistItemIndex != null) {
+                    addOption("--yes-playlist")
+                    addOption("--playlist-items", spec.playlistItemIndex.toString())
+                } else if (spec.playlistSingleOnly) {
+                    addOption("--no-playlist")
                 } else {
-                    "Downloading ${pct.toInt()}%$etaStr"
+                    addOption("--yes-playlist")
                 }
-                onProgress(pct, status)
+
+                // Avoid external aria2c when authenticated cookies are active so yt-dlp handles headers/redirects natively.
+                if (spec.useAria2c && cookieFile == null) {
+                    addOption("--downloader", "libaria2c.so")
+                    addOption("--external-downloader-args", "aria2c:-x 8 -k 1M")
+                }
+
+                when (spec.mode) {
+                    DownloadMode.VIDEO_MP4 -> {
+                        val format = if (effectiveMaxHeight != null) {
+                            "bv*[height<=$effectiveMaxHeight][ext=mp4]+ba[ext=m4a]/b[height<=$effectiveMaxHeight][ext=mp4]/bv*[height<=$effectiveMaxHeight]+ba/b[height<=$effectiveMaxHeight]/b"
+                        } else {
+                            "bv*[ext=mp4]+ba[ext=m4a]/b[ext=mp4]/bv*+ba/b"
+                        }
+                        addOption("-f", format)
+                        addOption("--merge-output-format", "mp4")
+                    }
+                    DownloadMode.VIDEO_BEST_MKV -> {
+                        val format = if (effectiveMaxHeight != null) {
+                            "bv*[height<=$effectiveMaxHeight]+ba/b[height<=$effectiveMaxHeight]/b"
+                        } else {
+                            "bv*+ba/b"
+                        }
+                        addOption("-f", format)
+                        addOption("--merge-output-format", "mkv")
+                    }
+                    DownloadMode.AUDIO_ONLY -> {
+                        addOption("-x")
+                        addOption("--audio-format", spec.audioFormat)
+                        addOption("--audio-quality", "0")
+                    }
+                }
+
+                if (spec.embedMetadata) {
+                    addOption("--embed-metadata")
+                }
+                if (spec.embedThumbnail && spec.mode != DownloadMode.VIDEO_BEST_MKV) {
+                    addOption("--embed-thumbnail")
+                }
+                buildSponsorBlockRemoveValue(spec)?.let { removeCategories ->
+                    addOption("--sponsorblock-remove", removeCategories)
+                }
             }
-        } finally {
-            cancelHandle.dispose()
-        }
 
-        val downloadedFiles = workDir.listFiles()
-            ?.filter { it.isFile && !it.name.endsWith(".part") && !it.name.endsWith(".ytdl") && !it.name.endsWith(".aria2") }
-            ?.sortedBy { it.lastModified() }
-            ?: emptyList()
+            val processId = "ytdlp_$jobId"
+            val cancelHandle = coroutineContext.job.invokeOnCompletion { cause ->
+                if (cause is CancellationException) {
+                    YoutubeDL.getInstance().destroyProcessById(processId)
+                }
+            }
 
-        if (downloadedFiles.isEmpty()) {
-            throw IOException("yt-dlp completed but produced no output file in ${workDir.name}")
+            val recentLines = ArrayDeque<String>(MAX_CAPTURED_LOG_LINES)
+            val response = try {
+                YoutubeDL.getInstance().execute(request, processId) { progress, etaInSeconds, line ->
+                    if (line.isNotBlank()) {
+                        synchronized(recentLines) {
+                            if (recentLines.size >= MAX_CAPTURED_LOG_LINES) {
+                                recentLines.removeFirst()
+                            }
+                            recentLines.addLast(line)
+                        }
+                    }
+                    val pct = if (progress >= 0f) progress.coerceIn(0f, 99.5f) else 0f
+                    val etaStr = if (etaInSeconds > 0L) " • ETA ${etaInSeconds}s" else ""
+                    val status = if (line.contains("[Merger]", ignoreCase = true) || line.contains("[ExtractAudio]", ignoreCase = true)) {
+                        "Muxing streams..."
+                    } else {
+                        "Downloading ${pct.toInt()}%$etaStr"
+                    }
+                    onProgress(pct, status)
+                }
+            } catch (t: Throwable) {
+                if (t is CancellationException) throw t
+                val captured = synchronized(recentLines) { recentLines.toList() }
+                val combinedErr = (listOfNotNull(t.message, t.cause?.message) + captured).joinToString("\n")
+                AuthErrorClassifier.classifyYtDlpError(
+                    url = spec.url,
+                    rawStderr = combinedErr,
+                    customDomains = authVault?.connectedCustomDomains().orEmpty()
+                )?.let { throw it }
+                throw t
+            } finally {
+                cancelHandle.dispose()
+            }
+
+            val downloadedFiles = workDir.listFiles()
+                ?.filter { it.isFile && !it.name.endsWith(".part") && !it.name.endsWith(".ytdl") && !it.name.endsWith(".aria2") }
+                ?.sortedBy { it.lastModified() }
+                ?: emptyList()
+
+            if (downloadedFiles.isEmpty()) {
+                val captured = synchronized(recentLines) { recentLines.toList() }
+                val combinedErr = (listOfNotNull(response.err) + captured).joinToString("\n")
+                AuthErrorClassifier.classifyYtDlpError(
+                    url = spec.url,
+                    rawStderr = combinedErr,
+                    customDomains = authVault?.connectedCustomDomains().orEmpty()
+                )?.let { throw it }
+                throw IOException("yt-dlp completed but produced no output file in ${workDir.name}")
+            }
+            downloadedFiles
         }
-        downloadedFiles
+    }
+
+    private suspend fun <T> withAuthCookies(
+        url: String,
+        siteConnectionId: String?,
+        block: suspend (cookieFile: File?, userAgent: String?) -> T
+    ): T {
+        val vault = authVault ?: return block(null, null)
+        return vault.withMaterializedCookies(url, siteConnectionId, block)
+    }
+
+    companion object {
+        private const val MAX_CAPTURED_LOG_LINES = 32
+
+        fun buildSponsorBlockRemoveValue(spec: DownloadSpec): String? {
+            val categories = spec.effectiveSponsorBlockCategories
+            if (categories.isEmpty()) return null
+            return SponsorBlockCategory.entries
+                .filter { it in categories }
+                .joinToString(",") { it.ytDlpKey }
+        }
     }
 }

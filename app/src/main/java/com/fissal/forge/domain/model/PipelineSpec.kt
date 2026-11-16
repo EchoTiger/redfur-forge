@@ -166,7 +166,12 @@ data class DeliverySpec(
     val saveToDevice: Boolean = true,
     val copyToClipboard: Boolean = false,
     val stripMetadata: Boolean = false,
-    val filenameSuffix: String = "_forge"
+    val filenameSuffix: String = "_forge",
+    val customOutputBaseName: String? = null,
+    val metadataTitle: String? = null,
+    val metadataArtist: String? = null,
+    val metadataAlbum: String? = null,
+    val metadataTrack: String? = null
 )
 
 @Serializable

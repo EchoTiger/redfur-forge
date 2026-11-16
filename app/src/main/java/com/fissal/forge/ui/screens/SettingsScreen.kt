@@ -2,6 +2,8 @@ package com.fissal.forge.ui.screens
 
 import android.content.Intent
 import android.net.Uri
+import androidx.activity.compose.rememberLauncherForActivityResult
+import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.foundation.BorderStroke
 import androidx.compose.foundation.background
 import androidx.compose.foundation.layout.Arrangement
@@ -23,6 +25,7 @@ import androidx.compose.foundation.verticalScroll
 import androidx.compose.material3.ButtonDefaults
 import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.FilterChip
+import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.LinearProgressIndicator
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedButton
@@ -32,6 +35,10 @@ import androidx.compose.material3.Surface
 import androidx.compose.material3.Switch
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.remember
+import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
@@ -39,6 +46,8 @@ import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
+import com.fissal.forge.auth.ConnectedServiceSummary
+import com.fissal.forge.auth.ServiceDescriptor
 import com.fissal.forge.data.settings.ForgeSettings
 import com.fissal.forge.domain.logic.DeviceCapabilityReport
 import com.fissal.forge.domain.logic.SettingTopic
@@ -46,11 +55,15 @@ import com.fissal.forge.domain.model.AspectPreset
 import com.fissal.forge.domain.model.DownloadMode
 import com.fissal.forge.domain.model.VideoCodecChoice
 import com.fissal.forge.ui.components.AboutWorkshopCard
+import com.fissal.forge.ui.components.AuthWebViewDialog
+import com.fissal.forge.ui.components.ConnectionsSettingsCard
 import com.fissal.forge.ui.components.DomainRolePill
 import com.fissal.forge.ui.components.EngineDomain
 import com.fissal.forge.ui.components.ForgeInfoTipButton
 import com.fissal.forge.ui.components.ForgePrimaryButton
 import com.fissal.forge.ui.components.RelayPrimaryButton
+import com.fissal.forge.ui.components.SilenceSkipControlPanel
+import com.fissal.forge.ui.components.SponsorBlockCategorySelector
 import com.fissal.forge.ui.components.WorkshopDomainCard
 import com.fissal.forge.ui.theme.AmberActive
 import com.fissal.forge.ui.theme.ArcRelayCyan
@@ -80,16 +93,35 @@ fun SettingsScreen(
     cacheSizeBytes: Long,
     appUpdateState: AppUpdateState,
     deviceCapabilities: DeviceCapabilityReport,
+    siteConnections: List<ConnectedServiceSummary>,
+    checkingServiceId: String?,
     onCheckAppUpdate: () -> Unit,
     onStartAppUpdate: () -> Unit,
     onCancelAppUpdate: () -> Unit,
     onInstallAppUpdate: () -> Unit,
+    onCaptureWebViewSession: (ServiceDescriptor, String, List<String>) -> Unit,
+    onImportCookiesTxt: (ServiceDescriptor, Uri) -> Unit,
+    onCheckSiteConnection: (String) -> Unit,
+    onRemoveSiteConnection: (String) -> Unit,
     onUpdateSettings: ((ForgeSettings) -> ForgeSettings) -> Unit,
     onUpdateYtDlp: (nightly: Boolean) -> Unit,
     onClearCache: () -> Unit,
     modifier: Modifier = Modifier
 ) {
     val context = LocalContext.current
+    var activeWebViewService by remember { mutableStateOf<ServiceDescriptor?>(null) }
+    var pendingImportService by remember { mutableStateOf<ServiceDescriptor?>(null) }
+
+    val cookiesPickerLauncher = rememberLauncherForActivityResult(
+        contract = ActivityResultContracts.OpenDocument()
+    ) { uri ->
+        val targetService = pendingImportService
+        pendingImportService = null
+        if (uri != null && targetService != null) {
+            onImportCookiesTxt(targetService, uri)
+            activeWebViewService = null
+        }
+    }
 
     Column(
         modifier = modifier
@@ -286,6 +318,20 @@ fun SettingsScreen(
             )
         }
 
+        // Connected Accounts & Cookies Vault (Issue #6)
+        ConnectionsSettingsCard(
+            connections = siteConnections,
+            checkingServiceId = checkingServiceId,
+            onConnectServiceWebView = { svc -> activeWebViewService = svc },
+            onImportCookiesTxt = { svc ->
+                pendingImportService = svc
+                cookiesPickerLauncher.launch(arrayOf("text/plain", "text/*", "*/*"))
+            },
+            onCheckConnection = onCheckSiteConnection,
+            onReauthenticate = { svc -> activeWebViewService = svc },
+            onRemoveConnection = onRemoveSiteConnection
+        )
+
         // Downloader Defaults
         SettingsDomainCard(
             title = "Downloader Defaults",
@@ -329,6 +375,49 @@ fun SettingsScreen(
                 checked = settings.embedDownloadMetadata,
                 onCheckedChange = { c ->
                     onUpdateSettings { it.copy(embedDownloadMetadata = c, embedDownloadThumbnail = c) }
+                }
+            )
+
+            HorizontalDivider(color = SlateOutline)
+
+            SponsorBlockCategorySelector(
+                title = "Default SponsorBlock Categories",
+                selectedCategories = settings.defaultSponsorBlockCategories,
+                capabilityReport = deviceCapabilities,
+                onToggleCategory = { cat ->
+                    onUpdateSettings { prev ->
+                        val next = if (cat in prev.defaultSponsorBlockCategories) {
+                            prev.defaultSponsorBlockCategories - cat
+                        } else {
+                            prev.defaultSponsorBlockCategories + cat
+                        }
+                        prev.copy(defaultSponsorBlockCategories = next)
+                    }
+                }
+            )
+
+            HorizontalDivider(color = SlateOutline)
+
+            SilenceSkipControlPanel(
+                enabled = settings.defaultSilenceSkip.enabled,
+                thresholdDb = settings.defaultSilenceSkip.thresholdDb,
+                minSilenceMs = settings.defaultSilenceSkip.minSilenceMs,
+                subtitle = "Post-download FFmpeg silence removal default for new links",
+                capabilityReport = deviceCapabilities,
+                onToggleEnabled = { enabled ->
+                    onUpdateSettings { prev ->
+                        prev.copy(defaultSilenceSkip = prev.defaultSilenceSkip.copy(enabled = enabled))
+                    }
+                },
+                onSelectThresholdDb = { db ->
+                    onUpdateSettings { prev ->
+                        prev.copy(defaultSilenceSkip = prev.defaultSilenceSkip.copy(enabled = true, thresholdDb = db))
+                    }
+                },
+                onSelectMinSilenceMs = { ms ->
+                    onUpdateSettings { prev ->
+                        prev.copy(defaultSilenceSkip = prev.defaultSilenceSkip.copy(enabled = true, minSilenceMs = ms))
+                    }
                 }
             )
         }
@@ -551,6 +640,21 @@ fun SettingsScreen(
         // Workshop About Card & Nixie Terminal Fuse Stamp
         AboutWorkshopCard(
             capabilitySummary = deviceCapabilities.compactHardwareSummary()
+        )
+    }
+
+    activeWebViewService?.let { service ->
+        AuthWebViewDialog(
+            service = service,
+            onDismiss = { activeWebViewService = null },
+            onCaptureSession = { resolvedService, ua, visitedUrls ->
+                activeWebViewService = null
+                onCaptureWebViewSession(resolvedService, ua, visitedUrls)
+            },
+            onImportCookiesClick = { resolvedService ->
+                pendingImportService = resolvedService
+                cookiesPickerLauncher.launch(arrayOf("text/plain", "text/*", "*/*"))
+            }
         )
     }
 }

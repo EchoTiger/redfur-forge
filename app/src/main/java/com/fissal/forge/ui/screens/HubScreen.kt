@@ -39,10 +39,12 @@ import androidx.compose.material.icons.rounded.ExpandLess
 import androidx.compose.material.icons.rounded.ExpandMore
 import androidx.compose.material.icons.rounded.FolderOpen
 import androidx.compose.material.icons.rounded.Image
+import androidx.compose.material.icons.rounded.Lock
 import androidx.compose.material.icons.rounded.MusicNote
 import androidx.compose.material.icons.rounded.Refresh
 import androidx.compose.material.icons.rounded.Tune
 import androidx.compose.material.icons.rounded.Videocam
+import androidx.compose.material3.Button
 import androidx.compose.material3.ButtonDefaults
 import androidx.compose.material3.Checkbox
 import androidx.compose.material3.CheckboxDefaults
@@ -58,6 +60,7 @@ import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.OutlinedTextFieldDefaults
 import androidx.compose.material3.Surface
+import androidx.compose.material3.Switch
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
@@ -88,6 +91,7 @@ import com.fissal.forge.domain.model.DownloadMode
 import com.fissal.forge.domain.model.LinkItemSettings
 import com.fissal.forge.domain.model.LinkResolveState
 import com.fissal.forge.domain.model.ResolvedLinkChipItem
+import com.fissal.forge.domain.model.SponsorBlockCategory
 import com.fissal.forge.domain.model.VideoCodecChoice
 import com.fissal.forge.pipeline.OrchestratorMetrics
 import com.fissal.forge.ui.components.DomainRolePill
@@ -95,6 +99,8 @@ import com.fissal.forge.ui.components.EngineDomain
 import com.fissal.forge.ui.components.ForgeInfoTipButton
 import com.fissal.forge.ui.components.LiveSizeEstimateBadge
 import com.fissal.forge.ui.components.RelayPrimaryButton
+import com.fissal.forge.ui.components.SilenceSkipControlPanel
+import com.fissal.forge.ui.components.SponsorBlockCategorySelector
 import com.fissal.forge.ui.components.WorkshopDomainCard
 import com.fissal.forge.ui.theme.AmberActive
 import com.fissal.forge.ui.theme.ArcRelayCyan
@@ -133,6 +139,12 @@ fun HubScreen(
     onUpdateChipSettings: (String, (LinkItemSettings) -> LinkItemSettings) -> Unit,
     onTogglePlaylistTrack: (String, Int) -> Unit,
     onSetAllPlaylistTracks: (String, Boolean) -> Unit,
+    onSetSplitByChapters: (String, Boolean) -> Unit,
+    onToggleChapterTrack: (String, Int) -> Unit,
+    onSetAllChapterTracks: (String, Boolean) -> Unit,
+    onSetBulkChapterMode: (String, DownloadMode, String?) -> Unit,
+    onToggleChapterTrackModeOverride: (String, Int) -> Unit,
+    onSetChapterTrackAudioFormat: (String, Int, String) -> Unit,
     onApplyToSameType: (String) -> Unit,
     onApplyToSameSite: (String) -> Unit,
     onApplyToAllLinks: (String) -> Unit,
@@ -141,14 +153,16 @@ fun HubScreen(
     onPickFilesClick: () -> Unit,
     onOpenQueueClick: () -> Unit,
     onCancelAll: () -> Unit,
-    onRemovePlaylistGroup: (String) -> Unit
+    onRemovePlaylistGroup: (String) -> Unit,
+    onPromptSignInForChip: (String) -> Unit
 ) {
     val totalQueuedItems = remember(resolvedLinks) {
         resolvedLinks.sumOf { chip ->
-            if (!chip.settings.playlistSingleOnly && chip.tracks.isNotEmpty()) {
-                chip.selectedTrackCount.coerceAtLeast(1)
-            } else {
-                1
+            when {
+                chip.effectivePlaylistActive && chip.tracks.isNotEmpty() -> chip.selectedTrackCount
+                !chip.effectivePlaylistActive && chip.settings.splitByChapters && chip.chapters.size >= 2 ->
+                    chip.selectedChapterCount
+                else -> 1
             }
         }
     }
@@ -341,10 +355,17 @@ fun HubScreen(
                     deviceCapabilities = deviceCapabilities,
                     onToggleExpand = { onToggleChipExpand(chip.cleanUrl) },
                     onRetryResolve = { onRetryResolveLink(chip.cleanUrl) },
+                    onPromptSignIn = { onPromptSignInForChip(chip.cleanUrl) },
                     onRemove = { onRemoveChip(chip.cleanUrl) },
                     onUpdateSettings = { transform -> onUpdateChipSettings(chip.cleanUrl, transform) },
                     onTogglePlaylistTrack = { idx -> onTogglePlaylistTrack(chip.cleanUrl, idx) },
                     onSetAllPlaylistTracks = { selected -> onSetAllPlaylistTracks(chip.cleanUrl, selected) },
+                    onSetSplitByChapters = { enabled -> onSetSplitByChapters(chip.cleanUrl, enabled) },
+                    onToggleChapterTrack = { idx -> onToggleChapterTrack(chip.cleanUrl, idx) },
+                    onSetAllChapterTracks = { selected -> onSetAllChapterTracks(chip.cleanUrl, selected) },
+                    onSetBulkChapterMode = { mode, fmt -> onSetBulkChapterMode(chip.cleanUrl, mode, fmt) },
+                    onToggleChapterModeOverride = { idx -> onToggleChapterTrackModeOverride(chip.cleanUrl, idx) },
+                    onSetChapterAudioFormat = { idx, fmt -> onSetChapterTrackAudioFormat(chip.cleanUrl, idx, fmt) },
                     onApplyToSameType = { onApplyToSameType(chip.cleanUrl) },
                     onApplyToSameSite = { onApplyToSameSite(chip.cleanUrl) },
                     onApplyToAllLinks = { onApplyToAllLinks(chip.cleanUrl) }
@@ -392,10 +413,12 @@ fun HubScreen(
                             horizontalArrangement = Arrangement.spacedBy(10.dp),
                             verticalAlignment = Alignment.CenterVertically
                         ) {
+                            val canQueue = totalQueuedItems > 0
                             OutlinedButton(
                                 onClick = { onQueueBatch(true, false) },
+                                enabled = canQueue,
                                 modifier = Modifier.weight(1f),
-                                border = BorderStroke(1.dp, RelayBevelOutline),
+                                border = BorderStroke(1.dp, if (canQueue) RelayBevelOutline else SlateOutline),
                                 colors = ButtonDefaults.outlinedButtonColors(contentColor = SecundaSilver)
                             ) {
                                 Icon(Icons.Rounded.ContentCopy, contentDescription = null, modifier = Modifier.size(16.dp))
@@ -404,6 +427,7 @@ fun HubScreen(
                             }
                             RelayPrimaryButton(
                                 onClick = { onQueueBatch(false, true) },
+                                enabled = canQueue,
                                 text = "Download & Forge ($totalQueuedItems)",
                                 icon = Icons.Rounded.Download,
                                 modifier = Modifier.weight(1.4f)
@@ -443,7 +467,7 @@ private fun WorkflowPipelineDashboardCard(
                     groupJobs.sumOf { job ->
                         when (job.statusEnum) {
                             JobStatus.COMPLETED -> 1.0
-                            else -> job.progress.toDouble().coerceIn(0.0, 1.0)
+                            else -> (job.progress.toDouble() / 100.0).coerceIn(0.0, 1.0)
                         }
                     }.toFloat() / groupJobs.size.toFloat()
                 }
@@ -564,13 +588,14 @@ private fun WorkflowPipelineDashboardCard(
                 HorizontalDivider(color = SlateOutline)
                 Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
                     Text(
-                        text = "Playlists in Queue",
+                        text = "Playlists & Chapter Batches",
                         style = MaterialTheme.typography.labelSmall,
                         color = SecundaSilver
                     )
                     playlistSummaries.forEach { (groupId, title, counts) ->
                         val (done, total, pair) = counts
                         val (active, progress) = pair
+                        val isChapterGroup = groupId.startsWith("ch_")
                         Surface(
                             color = SlateCard,
                             shape = RoundedCornerShape(12.dp),
@@ -596,7 +621,7 @@ private fun WorkflowPipelineDashboardCard(
                                         Icon(
                                             Icons.AutoMirrored.Rounded.QueueMusic,
                                             contentDescription = null,
-                                            tint = MasserCrimson,
+                                            tint = if (isChapterGroup) ArcRelayCyan else MasserCrimson,
                                             modifier = Modifier.size(16.dp)
                                         )
                                         Text(
@@ -608,8 +633,9 @@ private fun WorkflowPipelineDashboardCard(
                                         )
                                     }
                                     Row(verticalAlignment = Alignment.CenterVertically) {
+                                        val unitLabel = if (isChapterGroup) "tracks" else "songs"
                                         Text(
-                                            text = if (active > 0) "$done/$total • ${ (progress * 100).toInt() }%" else "$done/$total songs",
+                                            text = if (active > 0) "$done/$total • ${(progress * 100).toInt()}%" else "$done/$total $unitLabel",
                                             style = MaterialTheme.typography.labelSmall,
                                             color = if (done == total && total > 0) EmeraldSuccess else SecundaSilver
                                         )
@@ -619,7 +645,7 @@ private fun WorkflowPipelineDashboardCard(
                                         ) {
                                             Icon(
                                                 Icons.Rounded.Close,
-                                                contentDescription = "Remove playlist",
+                                                contentDescription = if (isChapterGroup) "Remove chapter batch" else "Remove playlist",
                                                 tint = CoralError,
                                                 modifier = Modifier.size(15.dp)
                                             )
@@ -632,7 +658,7 @@ private fun WorkflowPipelineDashboardCard(
                                         .fillMaxWidth()
                                         .height(5.dp)
                                         .clip(RoundedCornerShape(3.dp)),
-                                    color = if (done == total && total > 0) EmeraldSuccess else MasserCrimson,
+                                    color = if (done == total && total > 0) EmeraldSuccess else if (isChapterGroup) ArcRelayCyan else MasserCrimson,
                                     trackColor = SlateOutline
                                 )
                             }
@@ -772,17 +798,22 @@ private fun ResolvedLinkChipCard(
     deviceCapabilities: DeviceCapabilityReport,
     onToggleExpand: () -> Unit,
     onRetryResolve: () -> Unit,
+    onPromptSignIn: () -> Unit,
     onRemove: () -> Unit,
     onUpdateSettings: ((LinkItemSettings) -> LinkItemSettings) -> Unit,
     onTogglePlaylistTrack: (Int) -> Unit,
     onSetAllPlaylistTracks: (Boolean) -> Unit,
+    onSetSplitByChapters: (Boolean) -> Unit,
+    onToggleChapterTrack: (Int) -> Unit,
+    onSetAllChapterTracks: (Boolean) -> Unit,
+    onSetBulkChapterMode: (DownloadMode, String?) -> Unit,
+    onToggleChapterModeOverride: (Int) -> Unit,
+    onSetChapterAudioFormat: (Int, String) -> Unit,
     onApplyToSameType: () -> Unit,
     onApplyToSameSite: () -> Unit,
     onApplyToAllLinks: () -> Unit
 ) {
-    val isPlaylistChip = chip.tracks.isNotEmpty() ||
-        chip.detectedKind == DetectedLinkKind.PLAYLIST ||
-        chip.isPlaylistLikeUrl
+    val isPlaylistChip = chip.effectivePlaylistActive
 
     val kindColor = when (chip.detectedKind) {
         DetectedLinkKind.AUDIO -> Color(0xFF4FD1C5)
@@ -869,6 +900,20 @@ private fun ResolvedLinkChipCard(
                                 fg = ArcRelayCyan
                             )
                         }
+                        if (!isPlaylistChip && chip.chapters.size >= 2) {
+                            BadgePill(
+                                text = "${chip.chapters.size} Chapters Detected",
+                                bg = MoltenEmber.copy(alpha = 0.18f),
+                                fg = EmberFlame
+                            )
+                        }
+                        if (!chip.authRequiredReason.isNullOrBlank()) {
+                            BadgePill(
+                                text = "Sign In Required",
+                                bg = CoralError.copy(alpha = 0.18f),
+                                fg = CoralError
+                            )
+                        }
                         if (chipEstimate != null) {
                             LiveSizeEstimateBadge(
                                 estimate = chipEstimate,
@@ -897,6 +942,9 @@ private fun ResolvedLinkChipCard(
                         append(chip.settings.compactSummary())
                         if (isPlaylistChip && !chip.settings.playlistSingleOnly && chip.tracks.isNotEmpty()) {
                             append(" • ${chip.selectedTrackCount}/${chip.tracks.size} songs")
+                        } else if (!isPlaylistChip && chip.settings.splitByChapters && chip.chapters.size >= 2) {
+                            val selectedCh = chip.chapters.count { it.selected }
+                            append(" • $selectedCh/${chip.chapters.size} chapters")
                         }
                     }
                     Text(
@@ -950,24 +998,50 @@ private fun ResolvedLinkChipCard(
                 }
             }
 
-            if (chip.resolveState == LinkResolveState.FAILED && !chip.errorHint.isNullOrBlank()) {
-                Row(
-                    verticalAlignment = Alignment.CenterVertically,
-                    horizontalArrangement = Arrangement.spacedBy(6.dp)
-                ) {
-                    Icon(
-                        Icons.Rounded.ErrorOutline,
-                        contentDescription = null,
-                        tint = CoralError,
-                        modifier = Modifier.size(14.dp)
-                    )
-                    Text(
-                        text = "Metadata fallback active: ${chip.errorHint}",
-                        style = MaterialTheme.typography.labelSmall,
-                        color = CoralError,
-                        maxLines = 1,
-                        overflow = TextOverflow.Ellipsis
-                    )
+            if (!chip.authRequiredReason.isNullOrBlank() ||
+                (chip.resolveState == LinkResolveState.FAILED && !chip.errorHint.isNullOrBlank())
+            ) {
+                Column(verticalArrangement = Arrangement.spacedBy(6.dp)) {
+                    Row(
+                        verticalAlignment = Alignment.CenterVertically,
+                        horizontalArrangement = Arrangement.spacedBy(6.dp)
+                    ) {
+                        Icon(
+                            if (!chip.authRequiredReason.isNullOrBlank()) Icons.Rounded.Lock else Icons.Rounded.ErrorOutline,
+                            contentDescription = null,
+                            tint = CoralError,
+                            modifier = Modifier.size(14.dp)
+                        )
+                        Text(
+                            text = chip.authRequiredReason ?: "Metadata fallback active: ${chip.errorHint}",
+                            style = MaterialTheme.typography.labelSmall,
+                            color = CoralError,
+                            maxLines = 2,
+                            overflow = TextOverflow.Ellipsis
+                        )
+                    }
+                    if (!chip.authRequiredReason.isNullOrBlank()) {
+                        Button(
+                            onClick = onPromptSignIn,
+                            colors = ButtonDefaults.buttonColors(
+                                containerColor = MoltenEmber,
+                                contentColor = CrispWhite
+                            ),
+                            contentPadding = PaddingValues(horizontal = 12.dp, vertical = 6.dp),
+                            shape = RoundedCornerShape(10.dp)
+                        ) {
+                            Icon(
+                                Icons.Rounded.Lock,
+                                contentDescription = null,
+                                modifier = Modifier.size(15.dp)
+                            )
+                            Spacer(Modifier.width(6.dp))
+                            Text(
+                                text = "Sign In to Unlock",
+                                style = MaterialTheme.typography.labelMedium
+                            )
+                        }
+                    }
                 }
             }
 
@@ -1121,46 +1195,213 @@ private fun ResolvedLinkChipCard(
                         }
                     }
 
-                    // A2. Detected Chapters Live Size Preview (when available)
-                    if (chip.chapters.isNotEmpty()) {
+                    // A2. Interactive Chapter Chopper (Single Video Multi-Track Splitting)
+                    if (!isPlaylistChip && chip.chapters.size >= 2) {
+                        val selectedChaptersCount = chip.chapters.count { it.selected }
                         Surface(
                             color = SlateCard,
                             shape = RoundedCornerShape(12.dp),
-                            border = BorderStroke(1.dp, RelayBevelOutline)
+                            border = BorderStroke(
+                                1.dp,
+                                if (chip.settings.splitByChapters) MoltenEmber.copy(alpha = 0.7f) else RelayBevelOutline
+                            )
                         ) {
                             Column(
                                 modifier = Modifier.padding(10.dp),
-                                verticalArrangement = Arrangement.spacedBy(6.dp)
+                                verticalArrangement = Arrangement.spacedBy(8.dp)
                             ) {
-                                Text(
-                                    text = "Chapters (${chip.chapters.size})",
-                                    style = MaterialTheme.typography.labelMedium,
-                                    color = SecundaSilver
-                                )
-                                chip.chapters.take(6).forEach { chapter ->
-                                    val chEstimate = remember(chip, chapter) {
-                                        FilesizeEstimator.estimateChapterTrack(chip, chapter)
+                                Row(
+                                    modifier = Modifier.fillMaxWidth(),
+                                    horizontalArrangement = Arrangement.SpaceBetween,
+                                    verticalAlignment = Alignment.CenterVertically
+                                ) {
+                                    Column(modifier = Modifier.weight(1f)) {
+                                        Text(
+                                            text = "Split into Individual Tracks",
+                                            style = MaterialTheme.typography.labelMedium,
+                                            color = CrispWhite
+                                        )
+                                        Text(
+                                            text = if (chip.settings.splitByChapters) {
+                                                "${chip.chapters.size} chapters • downloads once & slices $selectedChaptersCount track${if (selectedChaptersCount == 1) "" else "s"} locally"
+                                            } else {
+                                                "${chip.chapters.size} chapters detected • turn on to split by timestamp"
+                                            },
+                                            style = MaterialTheme.typography.labelSmall,
+                                            color = MutedSteel
+                                        )
                                     }
+                                    Spacer(Modifier.width(8.dp))
+                                    Switch(
+                                        checked = chip.settings.splitByChapters,
+                                        onCheckedChange = onSetSplitByChapters
+                                    )
+                                }
+
+                                if (chip.settings.splitByChapters) {
                                     Row(
                                         modifier = Modifier.fillMaxWidth(),
-                                        verticalAlignment = Alignment.CenterVertically,
-                                        horizontalArrangement = Arrangement.SpaceBetween
+                                        horizontalArrangement = Arrangement.SpaceBetween,
+                                        verticalAlignment = Alignment.CenterVertically
                                     ) {
                                         Text(
-                                            text = "${chapter.index}. ${chapter.title} (${chapter.formattedRange()})",
+                                            text = "$selectedChaptersCount/${chip.chapters.size} selected",
                                             style = MaterialTheme.typography.labelSmall,
-                                            color = CrispWhite,
-                                            maxLines = 1,
-                                            overflow = TextOverflow.Ellipsis,
-                                            modifier = Modifier.weight(1f)
+                                            color = SecundaSilver
                                         )
-                                        if (chEstimate != null) {
-                                            Spacer(Modifier.width(6.dp))
-                                            BadgePill(
-                                                text = chEstimate.formattedEstimate(),
-                                                bg = RelayCard,
-                                                fg = ArcRelayCyan
+                                        Row(horizontalArrangement = Arrangement.spacedBy(4.dp)) {
+                                            TextButton(
+                                                onClick = { onSetAllChapterTracks(true) },
+                                                contentPadding = PaddingValues(horizontal = 8.dp, vertical = 2.dp)
+                                            ) {
+                                                Text("Select All", style = MaterialTheme.typography.labelSmall)
+                                            }
+                                            TextButton(
+                                                onClick = { onSetAllChapterTracks(false) },
+                                                contentPadding = PaddingValues(horizontal = 8.dp, vertical = 2.dp)
+                                            ) {
+                                                Text("Clear", style = MaterialTheme.typography.labelSmall, color = MutedSteel)
+                                            }
+                                        }
+                                    }
+
+                                    // Bulk mode overrides across all chapters
+                                    val allVideoSelected = chip.chapters.all {
+                                        (it.customSettings?.mode ?: chip.settings.mode) != DownloadMode.AUDIO_ONLY
+                                    }
+                                    FlowRow(
+                                        horizontalArrangement = Arrangement.spacedBy(6.dp),
+                                        verticalArrangement = Arrangement.spacedBy(6.dp)
+                                    ) {
+                                        FilterChip(
+                                            selected = allVideoSelected,
+                                            onClick = { onSetBulkChapterMode(DownloadMode.VIDEO_MP4, null) },
+                                            label = { Text("Keep Video + Audio") }
+                                        )
+                                        listOf("mp3", "opus", "flac").forEach { fmt ->
+                                            val allThisAudio = chip.chapters.all {
+                                                (it.customSettings?.mode ?: chip.settings.mode) == DownloadMode.AUDIO_ONLY &&
+                                                    (it.customSettings?.audioFormat ?: chip.settings.audioFormat).equals(fmt, ignoreCase = true)
+                                            }
+                                            FilterChip(
+                                                selected = allThisAudio,
+                                                onClick = { onSetBulkChapterMode(DownloadMode.AUDIO_ONLY, fmt) },
+                                                label = { Text("Audio ${fmt.uppercase()}") }
                                             )
+                                        }
+                                    }
+
+                                    Column(
+                                        modifier = Modifier
+                                            .fillMaxWidth()
+                                            .heightIn(max = 240.dp)
+                                            .verticalScroll(rememberScrollState()),
+                                        verticalArrangement = Arrangement.spacedBy(6.dp)
+                                    ) {
+                                        chip.chapters.forEach { chapter ->
+                                            val chMode = chapter.customSettings?.mode ?: chip.settings.mode
+                                            val chAudioMode = chMode == DownloadMode.AUDIO_ONLY
+                                            val chAudioFmt = (chapter.customSettings?.audioFormat ?: chip.settings.audioFormat).lowercase()
+                                            val chEstimate = remember(chip, chapter) {
+                                                FilesizeEstimator.estimateChapterTrack(chip, chapter)
+                                            }
+                                            Surface(
+                                                color = if (chapter.selected) VolcanicObsidian else SlateSurface,
+                                                shape = RoundedCornerShape(10.dp),
+                                                border = BorderStroke(
+                                                    1.dp,
+                                                    if (chapter.selected) SlateOutline else SlateOutline.copy(alpha = 0.45f)
+                                                ),
+                                                modifier = Modifier
+                                                    .fillMaxWidth()
+                                                    .clickable { onToggleChapterTrack(chapter.index) }
+                                            ) {
+                                                Column(
+                                                    modifier = Modifier.padding(horizontal = 8.dp, vertical = 6.dp),
+                                                    verticalArrangement = Arrangement.spacedBy(4.dp)
+                                                ) {
+                                                    Row(
+                                                        modifier = Modifier.fillMaxWidth(),
+                                                        verticalAlignment = Alignment.CenterVertically
+                                                    ) {
+                                                        Checkbox(
+                                                            checked = chapter.selected,
+                                                            onCheckedChange = { onToggleChapterTrack(chapter.index) },
+                                                            modifier = Modifier.size(30.dp),
+                                                            colors = CheckboxDefaults.colors(checkedColor = MoltenEmber)
+                                                        )
+                                                        Spacer(Modifier.width(6.dp))
+                                                        Column(modifier = Modifier.weight(1f)) {
+                                                            Text(
+                                                                text = "${chapter.index.toString().padStart(2, '0')}. ${chapter.title}",
+                                                                style = MaterialTheme.typography.labelMedium,
+                                                                color = if (chapter.selected) CrispWhite else MutedSteel,
+                                                                maxLines = 1,
+                                                                overflow = TextOverflow.Ellipsis
+                                                            )
+                                                            Text(
+                                                                text = chapter.formattedRange(),
+                                                                style = MaterialTheme.typography.labelSmall,
+                                                                color = SecundaSilver
+                                                            )
+                                                        }
+                                                        if (chEstimate != null) {
+                                                            Spacer(Modifier.width(6.dp))
+                                                            BadgePill(
+                                                                text = chEstimate.formattedEstimate(),
+                                                                bg = RelayCard,
+                                                                fg = ArcRelayCyan
+                                                            )
+                                                        }
+                                                    }
+
+                                                    Row(
+                                                        modifier = Modifier
+                                                            .fillMaxWidth()
+                                                            .padding(start = 36.dp),
+                                                        horizontalArrangement = Arrangement.spacedBy(6.dp),
+                                                        verticalAlignment = Alignment.CenterVertically
+                                                    ) {
+                                                        Surface(
+                                                            color = if (chAudioMode) ArcRelayCyan.copy(alpha = 0.16f) else MoltenEmber.copy(alpha = 0.18f),
+                                                            shape = RoundedCornerShape(6.dp),
+                                                            modifier = Modifier.clickable {
+                                                                onToggleChapterModeOverride(chapter.index)
+                                                            }
+                                                        ) {
+                                                            Text(
+                                                                text = if (chAudioMode) "Audio" else "Video + Audio",
+                                                                style = MaterialTheme.typography.labelSmall,
+                                                                color = if (chAudioMode) ArcRelayCyan else EmberFlame,
+                                                                modifier = Modifier.padding(horizontal = 8.dp, vertical = 3.dp)
+                                                            )
+                                                        }
+                                                        if (chAudioMode) {
+                                                            listOf("mp3", "opus", "flac").forEach { fmt ->
+                                                                val fmtActive = chAudioFmt == fmt
+                                                                Surface(
+                                                                    color = if (fmtActive) ArcRelayCyan.copy(alpha = 0.24f) else SlateCard,
+                                                                    shape = RoundedCornerShape(6.dp),
+                                                                    border = BorderStroke(
+                                                                        1.dp,
+                                                                        if (fmtActive) ArcRelayCyan else SlateOutline
+                                                                    ),
+                                                                    modifier = Modifier.clickable {
+                                                                        onSetChapterAudioFormat(chapter.index, fmt)
+                                                                    }
+                                                                ) {
+                                                                    Text(
+                                                                        text = fmt.uppercase(),
+                                                                        style = MaterialTheme.typography.labelSmall,
+                                                                        color = if (fmtActive) CrispWhite else MutedSteel,
+                                                                        modifier = Modifier.padding(horizontal = 6.dp, vertical = 2.dp)
+                                                                    )
+                                                                }
+                                                            }
+                                                        }
+                                                    }
+                                                }
+                                            }
                                         }
                                     }
                                 }
@@ -1208,25 +1449,54 @@ private fun ResolvedLinkChipCard(
                             }
                         }
 
-                        Row(
-                            verticalAlignment = Alignment.CenterVertically,
-                            horizontalArrangement = Arrangement.spacedBy(8.dp)
-                        ) {
-                            FilterChip(
-                                selected = chip.settings.embedMetadata,
-                                onClick = { onUpdateSettings { it.copy(embedMetadata = !it.embedMetadata) } },
-                                label = { Text("Embed Metadata") }
-                            )
-                            FilterChip(
-                                selected = chip.settings.sponsorBlock,
-                                onClick = { onUpdateSettings { it.copy(sponsorBlock = !it.sponsorBlock) } },
-                                label = { Text("SponsorBlock") }
-                            )
-                            ForgeInfoTipButton(
-                                topic = SettingTopic.SPONSOR_BLOCK,
-                                capabilityReport = deviceCapabilities
-                            )
-                        }
+                        FilterChip(
+                            selected = chip.settings.embedMetadata,
+                            onClick = { onUpdateSettings { it.copy(embedMetadata = !it.embedMetadata) } },
+                            label = { Text("Embed Metadata") }
+                        )
+
+                        SponsorBlockCategorySelector(
+                            selectedCategories = chip.settings.effectiveSponsorBlockCategories,
+                            capabilityReport = deviceCapabilities,
+                            onToggleCategory = { category ->
+                                onUpdateSettings { prev ->
+                                    val current = prev.effectiveSponsorBlockCategories
+                                    val next = if (category in current) {
+                                        current - category
+                                    } else {
+                                        current + category
+                                    }
+                                    prev.copy(
+                                        sponsorBlockCategories = next,
+                                        sponsorBlock = next.isNotEmpty()
+                                    )
+                                }
+                            }
+                        )
+
+                        SilenceSkipControlPanel(
+                            enabled = chip.settings.silenceSkip.enabled,
+                            thresholdDb = chip.settings.silenceSkip.thresholdDb,
+                            minSilenceMs = chip.settings.silenceSkip.minSilenceMs,
+                            subtitle = "Detects and cuts long dead-air pauses cleanly with matched A/V sync",
+                            audioAvailable = chip.detectedKind != DetectedLinkKind.IMAGE,
+                            capabilityReport = deviceCapabilities,
+                            onToggleEnabled = { enabled ->
+                                onUpdateSettings { prev ->
+                                    prev.copy(silenceSkip = prev.silenceSkip.copy(enabled = enabled))
+                                }
+                            },
+                            onSelectThresholdDb = { db ->
+                                onUpdateSettings { prev ->
+                                    prev.copy(silenceSkip = prev.silenceSkip.copy(thresholdDb = db))
+                                }
+                            },
+                            onSelectMinSilenceMs = { ms ->
+                                onUpdateSettings { prev ->
+                                    prev.copy(silenceSkip = prev.silenceSkip.copy(minSilenceMs = ms))
+                                }
+                            }
+                        )
                     }
 
                     // C. Perceptual Target Filesize Engine (Molten Forge Post-Download Stage)

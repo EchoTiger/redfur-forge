@@ -206,20 +206,12 @@ object FilesizeEstimator {
         defaultVideoCrf: Int = 23
     ): EstimatedSizeResult? {
         val settings = chip.settings
+        val silenceFactor = if (settings.silenceSkip.enabled) 0.90 else 1.0
 
         // Chapter-split handling (respects customSettings per chapter cleanly)
         if (settings.splitByChapters && chip.chapters.isNotEmpty()) {
             val selectedChapters = chip.chapters.filter { it.selected }
             if (selectedChapters.isEmpty()) {
-                if (settings.targetSizeMb != null && settings.targetSizeMb > 0.0) {
-                    val perItem = (settings.targetSizeMb * 1024.0 * 1024.0).roundToLong().coerceAtLeast(1L)
-                    return buildResult(
-                        estimatedBytes = perItem,
-                        minBytes = (perItem * 0.88).roundToLong(),
-                        maxBytes = perItem,
-                        sourceBytes = chip.approxBytes
-                    )
-                }
                 return null
             }
             val chapterResults = selectedChapters.mapNotNull { estimateChapterTrack(chip, it) }
@@ -232,7 +224,10 @@ object FilesizeEstimator {
         }
 
         val isPlaylist = chip.effectivePlaylistActive && chip.tracks.isNotEmpty()
-        val itemCount = if (isPlaylist) chip.selectedTrackCount.coerceAtLeast(1) else 1
+        if (isPlaylist && chip.selectedTrackCount <= 0) {
+            return null
+        }
+        val itemCount = if (isPlaylist) chip.selectedTrackCount else 1
 
         // 1. Target size MB override
         val targetMb = settings.targetSizeMb
@@ -251,7 +246,7 @@ object FilesizeEstimator {
         if (settings.mode == DownloadMode.AUDIO_ONLY) {
             val totalSec = resolveSelectedLinkDurationSec(chip, isPlaylist) ?: run {
                 val approx = chip.approxBytes?.takeIf { it > 0L } ?: return null
-                val audioEst = (approx * 0.14).roundToLong().coerceAtLeast(16_384L)
+                val audioEst = (approx * 0.14 * silenceFactor).roundToLong().coerceAtLeast(16_384L)
                 return buildResult(
                     estimatedBytes = audioEst,
                     minBytes = (audioEst * 0.70).roundToLong(),
@@ -260,10 +255,10 @@ object FilesizeEstimator {
                 )
             }
             val bytesPerSec = linkAudioBytesPerSec(settings.audioFormat)
-            val estimated = (totalSec * bytesPerSec).roundToLong() + (4_096L * itemCount)
+            val estimated = (totalSec * bytesPerSec * silenceFactor).roundToLong() + (4_096L * itemCount)
             return buildResult(
                 estimatedBytes = estimated,
-                minBytes = (estimated * 0.85).roundToLong(),
+                minBytes = (estimated * if (settings.silenceSkip.enabled) 0.72 else 0.85).roundToLong(),
                 maxBytes = (estimated * 1.15).roundToLong()
             )
         }
@@ -277,12 +272,14 @@ object FilesizeEstimator {
             } else {
                 1.0
             }
-            val estimated = (approx.toDouble() * resScale * selectionRatio).roundToLong().coerceAtLeast(16_384L)
+            val estimated = (approx.toDouble() * resScale * selectionRatio * silenceFactor)
+                .roundToLong()
+                .coerceAtLeast(16_384L)
             return buildResult(
                 estimatedBytes = estimated,
                 minBytes = (estimated * 0.80).roundToLong(),
                 maxBytes = (estimated * 1.25).roundToLong(),
-                sourceBytes = if (resScale < 0.99 || selectionRatio < 0.99) approx else null
+                sourceBytes = if (resScale < 0.99 || selectionRatio < 0.99 || settings.silenceSkip.enabled) approx else null
             )
         }
 
@@ -290,7 +287,9 @@ object FilesizeEstimator {
         val totalDurationSec = resolveSelectedLinkDurationSec(chip, isPlaylist) ?: return null
         val videoBps = estimateVideoBitrateBpsForHeight(settings.maxHeight)
         val crfFactor = 2.0.pow((23.0 - defaultVideoCrf.coerceIn(14, 42)) / 24.0).coerceIn(0.75, 1.35)
-        val estimated = ((videoBps.toDouble() * totalDurationSec / 8.0) * crfFactor).roundToLong().coerceAtLeast(16_384L)
+        val estimated = ((videoBps.toDouble() * totalDurationSec / 8.0) * crfFactor * silenceFactor)
+            .roundToLong()
+            .coerceAtLeast(16_384L)
         return buildResult(
             estimatedBytes = estimated,
             minBytes = (estimated * 0.72).roundToLong(),
@@ -303,6 +302,7 @@ object FilesizeEstimator {
         track: PlaylistTrackItem
     ): EstimatedSizeResult? {
         val settings = chip.settings
+        val silenceFactor = if (settings.silenceSkip.enabled) 0.90 else 1.0
         val targetMb = settings.targetSizeMb
         if (targetMb != null && targetMb > 0.0) {
             val bytes = (targetMb * 1024.0 * 1024.0).roundToLong().coerceAtLeast(1L)
@@ -321,7 +321,7 @@ object FilesizeEstimator {
 
         if (settings.mode == DownloadMode.AUDIO_ONLY) {
             val dur = trackDurSec ?: return null
-            val bytes = (dur * linkAudioBytesPerSec(settings.audioFormat)).roundToLong() + 4_096L
+            val bytes = (dur * linkAudioBytesPerSec(settings.audioFormat) * silenceFactor).roundToLong() + 4_096L
             return buildResult(
                 estimatedBytes = bytes,
                 minBytes = (bytes * 0.85).roundToLong(),
@@ -333,7 +333,7 @@ object FilesizeEstimator {
         if (approx != null && approx > 0L && chip.tracks.isNotEmpty()) {
             val resScale = resolutionCapScale(settings.maxHeight)
             val trackShare = resolveTrackShare(chip, track)
-            val bytes = (approx.toDouble() * resScale * trackShare).roundToLong().coerceAtLeast(8_192L)
+            val bytes = (approx.toDouble() * resScale * trackShare * silenceFactor).roundToLong().coerceAtLeast(8_192L)
             return buildResult(
                 estimatedBytes = bytes,
                 minBytes = (bytes * 0.80).roundToLong(),
@@ -343,7 +343,7 @@ object FilesizeEstimator {
 
         val dur = trackDurSec ?: return null
         val bps = estimateVideoBitrateBpsForHeight(settings.maxHeight)
-        val bytes = ((bps.toDouble() * dur) / 8.0).roundToLong().coerceAtLeast(16_384L)
+        val bytes = (((bps.toDouble() * dur) / 8.0) * silenceFactor).roundToLong().coerceAtLeast(16_384L)
         return buildResult(
             estimatedBytes = bytes,
             minBytes = (bytes * 0.72).roundToLong(),
@@ -356,6 +356,7 @@ object FilesizeEstimator {
         chapter: ChapterTrackItem
     ): EstimatedSizeResult? {
         val effSettings = chapter.customSettings ?: chip.settings
+        val silenceFactor = if (effSettings.silenceSkip.enabled) 0.90 else 1.0
         val targetMb = effSettings.targetSizeMb
         if (targetMb != null && targetMb > 0.0) {
             val bytes = (targetMb * 1024.0 * 1024.0).roundToLong().coerceAtLeast(1L)
@@ -370,10 +371,10 @@ object FilesizeEstimator {
         if (durSec <= 0.0) return null
 
         if (effSettings.mode == DownloadMode.AUDIO_ONLY) {
-            val bytes = (durSec * linkAudioBytesPerSec(effSettings.audioFormat)).roundToLong() + 4_096L
+            val bytes = (durSec * linkAudioBytesPerSec(effSettings.audioFormat) * silenceFactor).roundToLong() + 4_096L
             return buildResult(
                 estimatedBytes = bytes,
-                minBytes = (bytes * 0.85).roundToLong(),
+                minBytes = (bytes * if (effSettings.silenceSkip.enabled) 0.72 else 0.85).roundToLong(),
                 maxBytes = (bytes * 1.15).roundToLong()
             )
         }
@@ -386,7 +387,7 @@ object FilesizeEstimator {
                 ?: durSec
             val share = (durSec / totalSec).coerceIn(0.0, 1.0)
             val resScale = resolutionCapScale(effSettings.maxHeight)
-            val bytes = (approx.toDouble() * share * resScale).roundToLong().coerceAtLeast(4_096L)
+            val bytes = (approx.toDouble() * share * resScale * silenceFactor).roundToLong().coerceAtLeast(4_096L)
             return buildResult(
                 estimatedBytes = bytes,
                 minBytes = (bytes * 0.80).roundToLong(),
@@ -395,7 +396,7 @@ object FilesizeEstimator {
         }
 
         val bps = estimateVideoBitrateBpsForHeight(effSettings.maxHeight)
-        val bytes = ((bps.toDouble() * durSec) / 8.0).roundToLong().coerceAtLeast(8_192L)
+        val bytes = (((bps.toDouble() * durSec) / 8.0) * silenceFactor).roundToLong().coerceAtLeast(8_192L)
         return buildResult(
             estimatedBytes = bytes,
             minBytes = (bytes * 0.72).roundToLong(),

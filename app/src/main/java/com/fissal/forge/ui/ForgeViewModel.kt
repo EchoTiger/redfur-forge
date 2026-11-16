@@ -7,10 +7,15 @@ import android.content.Context
 import android.content.Intent
 import android.graphics.Bitmap
 import android.net.Uri
+import android.webkit.WebSettings
 import androidx.core.content.FileProvider
 import androidx.lifecycle.AndroidViewModel
 import androidx.lifecycle.viewModelScope
 import com.fissal.forge.ForgeApplication
+import com.fissal.forge.auth.AuthRequiredException
+import com.fissal.forge.auth.ConnectedServiceSummary
+import com.fissal.forge.auth.ServiceCatalog
+import com.fissal.forge.auth.ServiceDescriptor
 import com.fissal.forge.data.local.ForgeJobEntity
 import com.fissal.forge.data.settings.ForgeSettings
 import com.fissal.forge.domain.logic.AspectRatioSnapper
@@ -21,6 +26,7 @@ import com.fissal.forge.domain.logic.UrlBatchParser
 import com.fissal.forge.domain.logic.YtDlpJsonParser
 import com.fissal.forge.domain.model.AspectPreset
 import com.fissal.forge.domain.model.AudioCodecChoice
+import com.fissal.forge.domain.model.ChapterTrackItem
 import com.fissal.forge.domain.model.CompressMode
 import com.fissal.forge.domain.model.CompressSpec
 import com.fissal.forge.domain.model.CompressionTier
@@ -100,10 +106,21 @@ data class StudioItemConfig(
     val fadeInOut: Boolean = false,
     val muteAudio: Boolean = false,
     val silenceSkipEnabled: Boolean = false,
+    val silenceThresholdDb: Int = -38,
+    val silenceMinDurationMs: Int = 600,
     val cropEnabled: Boolean = false,
     val cropPreset: AspectPreset = AspectPreset.AUTO_CLOSEST,
     val cropRect: CropRectNormalized = CropRectNormalized(),
     val stripMetadata: Boolean = false
+)
+
+data class AuthPromptState(
+    val service: ServiceDescriptor?,
+    val targetUrl: String,
+    val reason: String,
+    val isPaywallOrSubscription: Boolean = false,
+    val retryCleanUrl: String? = null,
+    val retryJobId: String? = null
 )
 
 data class StudioSessionState(
@@ -150,6 +167,8 @@ data class StudioSessionState(
     val fadeInOut: Boolean get() = activeConfig.fadeInOut
     val muteAudio: Boolean get() = activeConfig.muteAudio
     val silenceSkipEnabled: Boolean get() = activeConfig.silenceSkipEnabled
+    val silenceThresholdDb: Int get() = activeConfig.silenceThresholdDb
+    val silenceMinDurationMs: Int get() = activeConfig.silenceMinDurationMs
     val cropEnabled: Boolean get() = activeConfig.cropEnabled
     val cropPreset: AspectPreset get() = activeConfig.cropPreset
     val cropRect: CropRectNormalized get() = activeConfig.cropRect
@@ -168,6 +187,7 @@ class ForgeViewModel(application: Application) : AndroidViewModel(application) {
     private val app: ForgeApplication = application as ForgeApplication
     private val orchestrator = app.orchestrator
     private val settingsRepo = app.settingsRepository
+    private val siteAuthVault = app.siteAuthVault
     private val probeEngine = app.probeEngine
     private val imageRawEngine = app.imageRawEngine
     private val ffmpegEngine = app.ffmpegEngine
@@ -179,6 +199,14 @@ class ForgeViewModel(application: Application) : AndroidViewModel(application) {
 
     val settings: StateFlow<ForgeSettings> = settingsRepo.settingsFlow
         .stateIn(viewModelScope, SharingStarted.Eagerly, ForgeSettings())
+
+    val siteConnections: StateFlow<List<ConnectedServiceSummary>> = siteAuthVault.connectionsFlow
+
+    private val _checkingServiceId = MutableStateFlow<String?>(null)
+    val checkingServiceId: StateFlow<String?> = _checkingServiceId.asStateFlow()
+
+    private val _authPrompt = MutableStateFlow<AuthPromptState?>(null)
+    val authPrompt: StateFlow<AuthPromptState?> = _authPrompt.asStateFlow()
 
     val jobs: StateFlow<List<ForgeJobEntity>> = orchestrator.jobsFlow
         .stateIn(viewModelScope, SharingStarted.Eagerly, emptyList())
@@ -198,6 +226,18 @@ class ForgeViewModel(application: Application) : AndroidViewModel(application) {
         viewModelScope.launch(Dispatchers.IO) {
             sampleVideoMutex.withLock {
                 runCatching { samplePreviewDir.deleteRecursively() }
+            }
+        }
+        viewModelScope.launch {
+            orchestrator.authRequiredEvents.collect { ev ->
+                _authPrompt.value = AuthPromptState(
+                    service = ev.exception.service ?: ServiceCatalog.matchUrl(ev.url, siteAuthVault.connectedCustomDomains()),
+                    targetUrl = ev.url,
+                    reason = ev.exception.userFacingReason,
+                    isPaywallOrSubscription = ev.exception.isPaywallOrSubscription,
+                    retryCleanUrl = null,
+                    retryJobId = ev.jobId
+                )
             }
         }
         viewModelScope.launch {
@@ -306,6 +346,7 @@ class ForgeViewModel(application: Application) : AndroidViewModel(application) {
                     val explicitPlaylist = item.cleanUrl.contains("/playlist", ignoreCase = true) ||
                         item.cleanUrl.contains("/sets/", ignoreCase = true) ||
                         item.cleanUrl.contains("/album/", ignoreCase = true)
+                    val matchedConnectionId = resolveConnectedSiteId(item.cleanUrl)
                     ResolvedLinkChipItem(
                         cleanUrl = item.cleanUrl,
                         host = item.host,
@@ -318,21 +359,32 @@ class ForgeViewModel(application: Application) : AndroidViewModel(application) {
                             maxHeight = curSettings.defaultMaxVideoHeight.takeIf { it > 0 },
                             audioFormat = curSettings.defaultAudioFormat,
                             playlistSingleOnly = if (explicitPlaylist) false else curSettings.playlistSingleOnly,
-                            embedMetadata = curSettings.embedDownloadMetadata
+                            sponsorBlock = curSettings.defaultSponsorBlockCategories.isNotEmpty(),
+                            embedMetadata = curSettings.embedDownloadMetadata,
+                            sponsorBlockCategories = curSettings.defaultSponsorBlockCategories,
+                            siteConnectionId = matchedConnectionId,
+                            silenceSkip = curSettings.defaultSilenceSkip
                         )
-                    ).also { launchMetadataResolve(item) }
+                    ).also { launchMetadataResolve(item, matchedConnectionId) }
                 }
             }
         }
         _resolvedLinks.value = updatedList
     }
 
-    private fun launchMetadataResolve(item: ParsedUrlItem) {
+    private fun launchMetadataResolve(item: ParsedUrlItem, explicitConnectionId: String? = null) {
         if (resolveJobs.containsKey(item.cleanUrl)) return
         val job = viewModelScope.launch {
             try {
+                val siteConnId = explicitConnectionId
+                    ?: _resolvedLinks.value.firstOrNull { it.cleanUrl == item.cleanUrl }?.settings?.siteConnectionId
+                    ?: resolveConnectedSiteId(item.cleanUrl)
                 val meta = resolveSemaphore.withPermit {
-                    ytDlpEngine.resolveMetadata(item.cleanUrl, item.cleanUrl.hashCode().toString())
+                    ytDlpEngine.resolveMetadata(
+                        url = item.cleanUrl,
+                        cancelKey = item.cleanUrl.hashCode().toString(),
+                        siteConnectionId = siteConnId
+                    )
                 }
                 metadataCache[item.cleanUrl] = meta
                 _resolvedLinks.update { list ->
@@ -346,6 +398,30 @@ class ForgeViewModel(application: Application) : AndroidViewModel(application) {
                 }
             } catch (_: CancellationException) {
                 // Removed from input
+            } catch (ex: AuthRequiredException) {
+                _resolvedLinks.update { list ->
+                    list.map { chip ->
+                        if (chip.cleanUrl == item.cleanUrl) {
+                            chip.copy(
+                                resolveState = LinkResolveState.FAILED,
+                                errorHint = ex.userFacingReason,
+                                authRequiredReason = ex.userFacingReason,
+                                authIsPaywall = ex.isPaywallOrSubscription,
+                                authServiceId = ex.service?.id
+                            )
+                        } else {
+                            chip
+                        }
+                    }
+                }
+                _authPrompt.value = AuthPromptState(
+                    service = ex.service ?: ServiceCatalog.matchUrl(item.cleanUrl, siteAuthVault.connectedCustomDomains()),
+                    targetUrl = item.cleanUrl,
+                    reason = ex.userFacingReason,
+                    isPaywallOrSubscription = ex.isPaywallOrSubscription,
+                    retryCleanUrl = item.cleanUrl,
+                    retryJobId = null
+                )
             } catch (err: Throwable) {
                 _resolvedLinks.update { list ->
                     list.map { chip ->
@@ -398,7 +474,11 @@ class ForgeViewModel(application: Application) : AndroidViewModel(application) {
                 maxHeight = curSettings.defaultMaxVideoHeight.takeIf { it > 0 },
                 audioFormat = curSettings.defaultAudioFormat,
                 playlistSingleOnly = if (autoFullPlaylist) false else curSettings.playlistSingleOnly,
-                embedMetadata = curSettings.embedDownloadMetadata
+                sponsorBlock = curSettings.defaultSponsorBlockCategories.isNotEmpty(),
+                embedMetadata = curSettings.embedDownloadMetadata,
+                sponsorBlockCategories = curSettings.defaultSponsorBlockCategories,
+                siteConnectionId = resolveConnectedSiteId(item.cleanUrl),
+                silenceSkip = curSettings.defaultSilenceSkip
             ),
             isExpanded = meta.tracks.size > 1
         )
@@ -435,7 +515,10 @@ class ForgeViewModel(application: Application) : AndroidViewModel(application) {
             chapters = meta.chapters,
             settings = updatedSettings,
             isExpanded = chip.isExpanded || (!chip.userCustomized && meta.tracks.size > 1),
-            errorHint = null
+            errorHint = null,
+            authRequiredReason = null,
+            authIsPaywall = false,
+            authServiceId = null
         )
     }
 
@@ -448,10 +531,24 @@ class ForgeViewModel(application: Application) : AndroidViewModel(application) {
     fun retryResolveLink(cleanUrl: String) {
         val parsed = _parsedUrls.value.firstOrNull { it.cleanUrl == cleanUrl } ?: return
         resolveJobs.remove(cleanUrl)?.cancel()
+        val connId = _resolvedLinks.value.firstOrNull { it.cleanUrl == cleanUrl }?.settings?.siteConnectionId
+            ?: resolveConnectedSiteId(cleanUrl)
         _resolvedLinks.update { list ->
-            list.map { if (it.cleanUrl == cleanUrl) it.copy(resolveState = LinkResolveState.RESOLVING, errorHint = null) else it }
+            list.map {
+                if (it.cleanUrl == cleanUrl) {
+                    it.copy(
+                        resolveState = LinkResolveState.RESOLVING,
+                        errorHint = null,
+                        authRequiredReason = null,
+                        authIsPaywall = false,
+                        authServiceId = null
+                    )
+                } else {
+                    it
+                }
+            }
         }
-        launchMetadataResolve(parsed)
+        launchMetadataResolve(parsed, connId)
     }
 
     fun removeResolvedLink(cleanUrl: String) {
@@ -467,14 +564,32 @@ class ForgeViewModel(application: Application) : AndroidViewModel(application) {
         _resolvedLinks.update { list ->
             list.map { chip ->
                 if (chip.cleanUrl == cleanUrl) {
+                    val nextSettings = transform(chip.settings).copy(scopeBadge = "Custom")
                     chip.copy(
-                        settings = transform(chip.settings).copy(scopeBadge = "Custom"),
+                        settings = nextSettings,
+                        chapters = syncChapterOverridesWithBase(chip.chapters, nextSettings),
                         userCustomized = true
                     )
                 } else {
                     chip
                 }
             }
+        }
+    }
+
+    private fun syncChapterOverridesWithBase(
+        chapters: List<ChapterTrackItem>,
+        nextBase: LinkItemSettings
+    ): List<ChapterTrackItem> {
+        if (chapters.none { it.customSettings != null }) return chapters
+        return chapters.map { ch ->
+            val existing = ch.customSettings ?: return@map ch
+            ch.copy(
+                customSettings = nextBase.copy(
+                    mode = existing.mode,
+                    audioFormat = existing.audioFormat
+                )
+            )
         }
     }
 
@@ -505,6 +620,304 @@ class ForgeViewModel(application: Application) : AndroidViewModel(application) {
         }
     }
 
+    fun setSplitByChapters(cleanUrl: String, enabled: Boolean) {
+        _resolvedLinks.update { list ->
+            list.map { chip ->
+                if (chip.cleanUrl == cleanUrl) {
+                    chip.copy(
+                        settings = chip.settings.copy(
+                            splitByChapters = enabled,
+                            scopeBadge = if (enabled) "Chapters" else chip.settings.scopeBadge?.takeUnless { it == "Chapters" }
+                        ),
+                        isExpanded = chip.isExpanded || enabled,
+                        userCustomized = true
+                    )
+                } else {
+                    chip
+                }
+            }
+        }
+    }
+
+    fun toggleChapterTrack(cleanUrl: String, chapterIndex: Int) {
+        _resolvedLinks.update { list ->
+            list.map { chip ->
+                if (chip.cleanUrl == cleanUrl) {
+                    val nextChapters = chip.chapters.map { ch ->
+                        if (ch.index == chapterIndex) ch.copy(selected = !ch.selected) else ch
+                    }
+                    chip.copy(chapters = nextChapters, userCustomized = true)
+                } else {
+                    chip
+                }
+            }
+        }
+    }
+
+    fun setAllChapterTracks(cleanUrl: String, selected: Boolean) {
+        _resolvedLinks.update { list ->
+            list.map { chip ->
+                if (chip.cleanUrl == cleanUrl) {
+                    chip.copy(
+                        chapters = chip.chapters.map { it.copy(selected = selected) },
+                        userCustomized = true
+                    )
+                } else {
+                    chip
+                }
+            }
+        }
+    }
+
+    fun setBulkChapterMode(cleanUrl: String, mode: DownloadMode, audioFormat: String? = null) {
+        _resolvedLinks.update { list ->
+            list.map { chip ->
+                if (chip.cleanUrl == cleanUrl) {
+                    val nextFormat = audioFormat ?: chip.settings.audioFormat
+                    val nextSettings = chip.settings.copy(
+                        mode = mode,
+                        audioFormat = nextFormat,
+                        splitByChapters = true
+                    )
+                    val clearedChapterOverrides = chip.chapters.map { ch ->
+                        val existingCustom = ch.customSettings
+                        if (existingCustom == null) {
+                            ch
+                        } else {
+                            ch.copy(
+                                customSettings = existingCustom.copy(
+                                    mode = mode,
+                                    audioFormat = nextFormat
+                                )
+                            )
+                        }
+                    }
+                    chip.copy(
+                        settings = nextSettings,
+                        chapters = clearedChapterOverrides,
+                        userCustomized = true
+                    )
+                } else {
+                    chip
+                }
+            }
+        }
+    }
+
+    fun toggleChapterTrackModeOverride(cleanUrl: String, chapterIndex: Int) {
+        _resolvedLinks.update { list ->
+            list.map { chip ->
+                if (chip.cleanUrl == cleanUrl) {
+                    val nextChapters = chip.chapters.map { ch ->
+                        if (ch.index == chapterIndex) {
+                            val base = ch.customSettings ?: chip.settings
+                            val nextMode = if (base.mode == DownloadMode.AUDIO_ONLY) {
+                                if (chip.settings.mode == DownloadMode.VIDEO_BEST_MKV) {
+                                    DownloadMode.VIDEO_BEST_MKV
+                                } else {
+                                    DownloadMode.VIDEO_MP4
+                                }
+                            } else {
+                                DownloadMode.AUDIO_ONLY
+                            }
+                            ch.copy(customSettings = base.copy(mode = nextMode))
+                        } else {
+                            ch
+                        }
+                    }
+                    chip.copy(chapters = nextChapters, userCustomized = true)
+                } else {
+                    chip
+                }
+            }
+        }
+    }
+
+    fun setChapterTrackAudioFormat(cleanUrl: String, chapterIndex: Int, audioFormat: String) {
+        _resolvedLinks.update { list ->
+            list.map { chip ->
+                if (chip.cleanUrl == cleanUrl) {
+                    val nextChapters = chip.chapters.map { ch ->
+                        if (ch.index == chapterIndex) {
+                            val base = ch.customSettings ?: chip.settings
+                            ch.copy(
+                                customSettings = base.copy(
+                                    mode = DownloadMode.AUDIO_ONLY,
+                                    audioFormat = audioFormat
+                                )
+                            )
+                        } else {
+                            ch
+                        }
+                    }
+                    chip.copy(chapters = nextChapters, userCustomized = true)
+                } else {
+                    chip
+                }
+            }
+        }
+    }
+
+    fun dismissAuthPrompt() {
+        _authPrompt.value = null
+    }
+
+    fun promptSignInForChip(cleanUrl: String) {
+        val chip = _resolvedLinks.value.firstOrNull { it.cleanUrl == cleanUrl } ?: return
+        val service = chip.authServiceId?.let { ServiceCatalog.findById(it) }
+            ?: ServiceCatalog.matchUrl(cleanUrl, siteAuthVault.connectedCustomDomains())
+        _authPrompt.value = AuthPromptState(
+            service = service,
+            targetUrl = cleanUrl,
+            reason = chip.authRequiredReason ?: chip.errorHint ?: "Sign in to access private or members-only media.",
+            isPaywallOrSubscription = chip.authIsPaywall,
+            retryCleanUrl = cleanUrl,
+            retryJobId = null
+        )
+    }
+
+    fun completeWebViewSignIn(
+        service: ServiceDescriptor,
+        userAgent: String,
+        visitedUrls: List<String>,
+        pendingRetryUrl: String? = null,
+        pendingRetryJobId: String? = null
+    ) {
+        viewModelScope.launch {
+            runCatching {
+                siteAuthVault.saveWebViewSession(service, userAgent, visitedUrls)
+            }.onSuccess { summary ->
+                applyConnectedSessionAndRetry(summary, pendingRetryUrl, pendingRetryJobId)
+                showBanner("Connected ${summary.service.displayName} securely (${summary.cookieCount} cookies)")
+            }.onFailure { err ->
+                showBanner(err.message ?: "Could not capture sign-in session")
+            }
+        }
+    }
+
+    fun importCookiesForService(
+        service: ServiceDescriptor,
+        uri: Uri,
+        pendingRetryUrl: String? = null,
+        pendingRetryJobId: String? = null
+    ) {
+        viewModelScope.launch {
+            val defaultUa = runCatching { WebSettings.getDefaultUserAgent(app) }.getOrDefault("")
+                .replace("; wv", "")
+                .replace("Version/4.0 ", "")
+                .replace(Regex("\\s{2,}"), " ")
+                .trim()
+            val result = siteAuthVault.importCookiesTxt(service, uri, defaultUa)
+            result.onSuccess { summary ->
+                applyConnectedSessionAndRetry(summary, pendingRetryUrl, pendingRetryJobId)
+                showBanner("Imported ${summary.cookieCount} encrypted cookies for ${summary.service.displayName}")
+            }.onFailure { err ->
+                showBanner(err.message ?: "Failed to import cookies.txt")
+            }
+        }
+    }
+
+    fun checkSiteConnection(serviceId: String) {
+        if (_checkingServiceId.value != null) return
+        viewModelScope.launch {
+            _checkingServiceId.value = serviceId
+            try {
+                val summary = siteAuthVault.checkConnection(serviceId)
+                if (summary != null) {
+                    showBanner("${summary.service.displayName}: ${summary.statusMessage}")
+                }
+            } catch (err: Throwable) {
+                showBanner(err.message ?: "Connection check failed")
+            } finally {
+                _checkingServiceId.value = null
+            }
+        }
+    }
+
+    fun removeSiteConnection(serviceId: String) {
+        viewModelScope.launch {
+            runCatching {
+                siteAuthVault.removeConnection(serviceId)
+            }.onSuccess {
+                _resolvedLinks.update { list ->
+                    list.map { chip ->
+                        if (chip.settings.siteConnectionId == serviceId) {
+                            chip.copy(settings = chip.settings.copy(siteConnectionId = null))
+                        } else {
+                            chip
+                        }
+                    }
+                }
+                showBanner("Disconnected & wiped local session cookies")
+            }.onFailure { err ->
+                showBanner(err.message ?: "Failed to remove site connection")
+            }
+        }
+    }
+
+    private fun applyConnectedSessionAndRetry(
+        summary: ConnectedServiceSummary,
+        pendingRetryUrl: String?,
+        pendingRetryJobId: String?
+    ) {
+        _authPrompt.value = null
+        val matchedService = summary.service
+        val urlsToClear = metadataCache.keys.filter { cachedUrl ->
+            cachedUrl == pendingRetryUrl ||
+                ServiceCatalog.matchUrl(cachedUrl, siteAuthVault.connectedCustomDomains())?.id == summary.serviceId ||
+                matchedService.hostMatchers.any { matcher ->
+                    val host = ServiceCatalog.extractHost(cachedUrl).orEmpty()
+                    host == matcher || host.endsWith(".$matcher")
+                }
+        }
+        urlsToClear.forEach { metadataCache.remove(it) }
+
+        val urlsToAutoRetry = mutableSetOf<String>()
+        if (!pendingRetryUrl.isNullOrBlank()) {
+            urlsToAutoRetry += pendingRetryUrl
+        }
+
+        _resolvedLinks.update { list ->
+            list.map { chip ->
+                val hostMatches = chip.cleanUrl == pendingRetryUrl ||
+                    chip.authServiceId == summary.serviceId ||
+                    ServiceCatalog.matchUrl(chip.cleanUrl, siteAuthVault.connectedCustomDomains())?.id == summary.serviceId
+                if (hostMatches) {
+                    if (chip.resolveState == LinkResolveState.FAILED) {
+                        urlsToAutoRetry += chip.cleanUrl
+                    }
+                    chip.copy(
+                        settings = chip.settings.copy(siteConnectionId = summary.serviceId),
+                        authRequiredReason = null,
+                        authIsPaywall = false,
+                        authServiceId = null
+                    )
+                } else {
+                    chip
+                }
+            }
+        }
+
+        urlsToAutoRetry.forEach { retryUrl ->
+            retryResolveLink(retryUrl)
+        }
+        if (!pendingRetryJobId.isNullOrBlank()) {
+            val groupId = jobs.value.firstOrNull { it.id == pendingRetryJobId }?.groupId
+            if (!groupId.isNullOrBlank()) {
+                retryPlaylistGroup(groupId)
+            } else {
+                retryJob(pendingRetryJobId)
+            }
+        }
+    }
+
+    private fun resolveConnectedSiteId(url: String): String? {
+        val matched = ServiceCatalog.matchUrl(url, siteAuthVault.connectedCustomDomains()) ?: return null
+        return matched.id.takeIf { id ->
+            siteConnections.value.any { it.serviceId == id }
+        }
+    }
+
     fun applySettingsToSameType(sourceUrl: String) {
         val source = _resolvedLinks.value.firstOrNull { it.cleanUrl == sourceUrl } ?: return
         val matchKind = source.contentMediaKind
@@ -514,11 +927,15 @@ class ForgeViewModel(application: Application) : AndroidViewModel(application) {
             list.map { chip ->
                 if (chip.contentMediaKind == matchKind) {
                     affected++
+                    val nextSettings = source.settings.copy(
+                        playlistSingleOnly = chip.settings.playlistSingleOnly,
+                        splitByChapters = chip.settings.splitByChapters,
+                        siteConnectionId = chip.settings.siteConnectionId,
+                        scopeBadge = badge
+                    )
                     chip.copy(
-                        settings = source.settings.copy(
-                            playlistSingleOnly = chip.settings.playlistSingleOnly,
-                            scopeBadge = badge
-                        ),
+                        settings = nextSettings,
+                        chapters = syncChapterOverridesWithBase(chip.chapters, nextSettings),
                         userCustomized = true
                     )
                 } else {
@@ -538,11 +955,15 @@ class ForgeViewModel(application: Application) : AndroidViewModel(application) {
             list.map { chip ->
                 if (chip.host.equals(host, ignoreCase = true)) {
                     affected++
+                    val nextSettings = source.settings.copy(
+                        playlistSingleOnly = chip.settings.playlistSingleOnly,
+                        splitByChapters = chip.settings.splitByChapters,
+                        siteConnectionId = chip.settings.siteConnectionId,
+                        scopeBadge = host
+                    )
                     chip.copy(
-                        settings = source.settings.copy(
-                            playlistSingleOnly = chip.settings.playlistSingleOnly,
-                            scopeBadge = host
-                        ),
+                        settings = nextSettings,
+                        chapters = syncChapterOverridesWithBase(chip.chapters, nextSettings),
                         userCustomized = true
                     )
                 } else {
@@ -557,11 +978,15 @@ class ForgeViewModel(application: Application) : AndroidViewModel(application) {
         val source = _resolvedLinks.value.firstOrNull { it.cleanUrl == sourceUrl } ?: return
         _resolvedLinks.update { list ->
             list.map { chip ->
+                val nextSettings = source.settings.copy(
+                    playlistSingleOnly = chip.settings.playlistSingleOnly,
+                    splitByChapters = chip.settings.splitByChapters,
+                    siteConnectionId = chip.settings.siteConnectionId,
+                    scopeBadge = "All Links"
+                )
                 chip.copy(
-                    settings = source.settings.copy(
-                        playlistSingleOnly = chip.settings.playlistSingleOnly,
-                        scopeBadge = "All Links"
-                    ),
+                    settings = nextSettings,
+                    chapters = syncChapterOverridesWithBase(chip.chapters, nextSettings),
                     userCustomized = true
                 )
             }
@@ -572,7 +997,11 @@ class ForgeViewModel(application: Application) : AndroidViewModel(application) {
     fun applyQuickBatchPreset(transform: (LinkItemSettings) -> LinkItemSettings) {
         _resolvedLinks.update { list ->
             list.map { chip ->
-                chip.copy(settings = transform(chip.settings))
+                val nextSettings = transform(chip.settings)
+                chip.copy(
+                    settings = nextSettings,
+                    chapters = syncChapterOverridesWithBase(chip.chapters, nextSettings)
+                )
             }
         }
     }
@@ -683,6 +1112,8 @@ class ForgeViewModel(application: Application) : AndroidViewModel(application) {
             trimEnabled = false,
             trimStartMs = 0L,
             trimEndMs = item.durationMs,
+            silenceThresholdDb = cur.defaultSilenceSkip.thresholdDb,
+            silenceMinDurationMs = cur.defaultSilenceSkip.minSilenceMs,
             cropEnabled = false,
             cropPreset = resolvedPreset,
             cropRect = resolvedRect,
@@ -970,7 +1401,11 @@ class ForgeViewModel(application: Application) : AndroidViewModel(application) {
         }
 
         val silenceSkipSpec = if (cfg.silenceSkipEnabled && probe.isTimeBased) {
-            SilenceSkipSpec(enabled = true)
+            SilenceSkipSpec(
+                enabled = true,
+                thresholdDb = cfg.silenceThresholdDb.coerceIn(-90, -10),
+                minSilenceMs = cfg.silenceMinDurationMs.coerceIn(100, 10_000)
+            )
         } else {
             null
         }
@@ -1157,6 +1592,9 @@ class ForgeViewModel(application: Application) : AndroidViewModel(application) {
         trimStartMs,
         trimEndMs,
         muteAudio,
+        silenceSkipEnabled,
+        silenceThresholdDb,
+        silenceMinDurationMs,
         cropEnabled,
         cropPreset,
         cropRect

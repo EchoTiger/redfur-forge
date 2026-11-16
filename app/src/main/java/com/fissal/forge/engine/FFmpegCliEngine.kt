@@ -16,6 +16,7 @@ import com.fissal.forge.domain.model.ConvertSpec
 import com.fissal.forge.domain.model.MediaKind
 import com.fissal.forge.domain.model.MediaProbeResult
 import com.fissal.forge.domain.model.PipelineSpec
+import com.fissal.forge.domain.model.SilenceSkipSpec
 import com.fissal.forge.domain.model.VideoCodecChoice
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Dispatchers
@@ -66,11 +67,14 @@ class FFmpegCliEngine(
         val targetBytes = if (spec.compress?.mode == CompressMode.TARGET_BYTES) spec.compress.targetBytes else null
         val desiredExt = (spec.convert?.targetExtension ?: probe.extension).lowercase(Locale.US)
         val inputExt = inputFile.extension.lowercase(Locale.US)
+        val silenceSpec = spec.silenceSkip?.takeIf { it.enabled } ?: spec.trim?.silenceSkip?.takeIf { it.enabled }
+        val silenceTouchesMedia = silenceSpec != null && (probe.mediaKind == MediaKind.AUDIO || probe.hasAudio)
 
         // Zero-loss passthrough if the file already fits the target byte limit and needs no edits
         if (targetBytes != null &&
             spec.trim == null &&
             spec.crop == null &&
+            !silenceTouchesMedia &&
             inputFile.exists() &&
             inputFile.length() in 1L..targetBytes &&
             (desiredExt.isBlank() || desiredExt == inputExt)
@@ -80,7 +84,30 @@ class FFmpegCliEngine(
             return@withContext outputFile
         }
 
-        val effectiveDurationMs = computeEffectiveDurationMs(probe, spec)
+        val baseDurationMs = computeEffectiveDurationMs(probe, spec)
+        val videoSilenceEligible = silenceSpec != null &&
+            probe.mediaKind == MediaKind.VIDEO &&
+            desiredExt != "gif" &&
+            probe.hasAudio &&
+            spec.trim?.muteAudio != true &&
+            spec.convert?.audioCodec != AudioCodecChoice.MUTE
+        val keepSegmentsMs: List<Pair<Long, Long>>? = if (videoSilenceEligible) {
+            onProgress(1f, "Detecting silence intervals...")
+            val detected = detectKeepSegments(inputFile, spec, silenceSpec!!, baseDurationMs)
+            val totalKeepMs = detected.sumOf { (it.second - it.first).coerceAtLeast(0L) }
+            if (detected.isNotEmpty() && totalKeepMs > 0L && totalKeepMs < baseDurationMs - 200L) {
+                detected
+            } else {
+                null
+            }
+        } else {
+            null
+        }
+        val effectiveDurationMs = if (!keepSegmentsMs.isNullOrEmpty()) {
+            keepSegmentsMs.sumOf { (it.second - it.first).coerceAtLeast(0L) }.coerceAtLeast(500L)
+        } else {
+            baseDurationMs
+        }
         val complexityFactor = if (
             targetBytes != null &&
             probe.mediaKind == MediaKind.VIDEO &&
@@ -92,7 +119,16 @@ class FFmpegCliEngine(
             1.0
         }
 
-        var activeSpec = spec
+        // If silencedetect pre-pass ran on video+audio and confirmed no cuttable pauses, strip silenceSkip so
+        // FFmpegCommandBuilder does not apply audio-only `silenceremove:timestamp=copy` over uncut video.
+        var activeSpec = if (videoSilenceEligible && keepSegmentsMs == null) {
+            spec.copy(
+                silenceSkip = null,
+                trim = spec.trim?.copy(silenceSkip = null)
+            )
+        } else {
+            spec
+        }
         try {
             runEncodeStrategy(
                 inputFile = inputFile,
@@ -103,6 +139,7 @@ class FFmpegCliEngine(
                 bitrateMultiplier = 1.0,
                 effectiveDurationMs = effectiveDurationMs,
                 complexityFactor = complexityFactor,
+                keepSegmentsMs = keepSegmentsMs,
                 onProgress = onProgress
             )
         } catch (err: Throwable) {
@@ -124,6 +161,7 @@ class FFmpegCliEngine(
                     bitrateMultiplier = 1.0,
                     effectiveDurationMs = effectiveDurationMs,
                     complexityFactor = complexityFactor,
+                    keepSegmentsMs = keepSegmentsMs,
                     onProgress = onProgress
                 )
             } else {
@@ -146,6 +184,7 @@ class FFmpegCliEngine(
                 bitrateMultiplier = correction.coerceIn(0.25, 0.93),
                 effectiveDurationMs = effectiveDurationMs,
                 complexityFactor = complexityFactor,
+                keepSegmentsMs = keepSegmentsMs,
                 onProgress = onProgress
             )
             if (tempCorrected.exists()) {
@@ -621,6 +660,7 @@ class FFmpegCliEngine(
         bitrateMultiplier: Double,
         effectiveDurationMs: Long,
         complexityFactor: Double,
+        keepSegmentsMs: List<Pair<Long, Long>>? = null,
         onProgress: (Float, String) -> Unit
     ) {
         val useTwoPass = FFmpegCommandBuilder.shouldUseTwoPass(probe, spec)
@@ -635,7 +675,8 @@ class FFmpegCliEngine(
                 effectiveDurationMs = effectiveDurationMs,
                 passMode = EncodePassMode.SINGLE,
                 passLogPrefix = null,
-                complexityFactor = complexityFactor
+                complexityFactor = complexityFactor,
+                keepSegmentsMs = keepSegmentsMs
             ) { pct, msg ->
                 onProgress(pct, msg)
             }
@@ -656,7 +697,8 @@ class FFmpegCliEngine(
                 effectiveDurationMs = effectiveDurationMs,
                 passMode = EncodePassMode.PASS_1,
                 passLogPrefix = passLogPrefix,
-                complexityFactor = complexityFactor
+                complexityFactor = complexityFactor,
+                keepSegmentsMs = keepSegmentsMs
             ) { pct, _ ->
                 onProgress((pct * 0.28f).coerceIn(0f, 28f), "Analyzing timeline (Pass 1/2: ${pct.toInt()}%)")
             }
@@ -672,7 +714,8 @@ class FFmpegCliEngine(
                 effectiveDurationMs = effectiveDurationMs,
                 passMode = EncodePassMode.PASS_2,
                 passLogPrefix = passLogPrefix,
-                complexityFactor = complexityFactor
+                complexityFactor = complexityFactor,
+                keepSegmentsMs = keepSegmentsMs
             ) { pct, label ->
                 val mapped = 28f + (pct * 0.70f)
                 onProgress(mapped.coerceIn(28f, 99f), "Pass 2/2 • $label")
@@ -683,20 +726,102 @@ class FFmpegCliEngine(
     }
 
     /**
+     * Runs an audio-only `silencedetect` pre-pass on video+audio inputs so video frames and audio
+     * samples can be jumpcut symmetrically with zero A/V drift.
+     */
+    private suspend fun detectKeepSegments(
+        inputFile: File,
+        spec: PipelineSpec,
+        silenceSpec: SilenceSkipSpec,
+        baseDurationMs: Long
+    ): List<Pair<Long, Long>> = withContext(Dispatchers.IO) {
+        coroutineContext.ensureActive()
+        val thresholdDb = silenceSpec.thresholdDb.coerceIn(-90, 0)
+        val durationSec = String.format(
+            Locale.US,
+            "%.3f",
+            silenceSpec.minSilenceMs.coerceIn(50, 10_000) / 1000.0
+        )
+        val trim = spec.trim
+        val startMs = (trim?.startMs ?: 0L).coerceAtLeast(0L)
+        val endMs = trim?.endMs?.takeIf { it > startMs }
+        val args = mutableListOf(
+            binaryManager.ffmpegExecutable.absolutePath,
+            "-nostdin", "-y", "-hide_banner", "-loglevel", "info"
+        )
+        if (startMs > 0L) {
+            args += listOf("-ss", String.format(Locale.US, "%.3f", startMs / 1000.0))
+        }
+        args += listOf("-i", inputFile.absolutePath)
+        if (endMs != null && baseDurationMs > 0L) {
+            args += listOf("-t", String.format(Locale.US, "%.3f", baseDurationMs / 1000.0))
+        }
+        args += listOf(
+            "-vn",
+            "-af", "silencedetect=noise=${thresholdDb}dB:d=$durationSec",
+            "-f", "null",
+            "/dev/null"
+        )
+
+        val pb = ProcessBuilder(args)
+        pb.environment()["LD_LIBRARY_PATH"] = binaryManager.ldLibraryPath
+        pb.environment()["TMPDIR"] = appContext.cacheDir.absolutePath
+        pb.redirectErrorStream(true)
+
+        val process = pb.start()
+        val cancelHandle = coroutineContext.job.invokeOnCompletion { cause ->
+            if (cause is CancellationException) {
+                process.destroy()
+                if (process.isAlive) process.destroyForcibly()
+            }
+        }
+
+        val logBuilder = StringBuilder()
+        try {
+            process.inputStream.bufferedReader().useLines { lines ->
+                lines.forEach { line ->
+                    if (line.contains("silencedetect") || line.contains("silence_")) {
+                        logBuilder.append(line).append('\n')
+                    }
+                }
+            }
+            coroutineContext.ensureActive()
+            val exitCode = process.waitFor()
+            if (exitCode != 0) {
+                return@withContext emptyList()
+            }
+            FFmpegCommandBuilder.parseSilenceKeepSegments(
+                ffmpegLog = logBuilder.toString(),
+                clipDurationMs = baseDurationMs
+            )
+        } catch (err: Throwable) {
+            if (err is CancellationException) throw err
+            emptyList()
+        } finally {
+            cancelHandle.dispose()
+            runCatching { process.inputStream.close() }
+            runCatching { process.outputStream.close() }
+            runCatching { process.errorStream.close() }
+            if (process.isAlive) process.destroyForcibly()
+        }
+    }
+
+    /**
      * Runs up to two fast 1-second CRF 26 calibration probes at 25% and 70% into the clip
      * so static lectures/lyrics keep higher resolution while noisy action clips guard against overshoot.
      */
-    private fun measureSceneComplexity(
+    private suspend fun measureSceneComplexity(
         inputFile: File,
         effectiveDurationMs: Long,
         spec: PipelineSpec
-    ): Double = runCatching {
+    ): Double = withContext(Dispatchers.IO) {
         val trimStartSec = (spec.trim?.startMs ?: 0L) / 1000.0
         val durSec = effectiveDurationMs / 1000.0
         val offsets = listOf(trimStartSec + durSec * 0.25, trimStartSec + durSec * 0.70)
         val measuredKbps = mutableListOf<Double>()
 
         for (offset in offsets) {
+            coroutineContext.ensureActive()
             val cmd = listOf(
                 binaryManager.ffmpegExecutable.absolutePath,
                 "-nostdin", "-y", "-hide_banner", "-loglevel", "info",
@@ -713,23 +838,39 @@ class FFmpegCliEngine(
             pb.environment()["TMPDIR"] = appContext.cacheDir.absolutePath
             pb.redirectErrorStream(true)
             val proc = pb.start()
-            val out = proc.inputStream.bufferedReader().readText()
-            val rc = proc.waitFor()
-            if (rc == 0) {
-                val kbMatch = Regex("""L?size=.*bitrate=\s*([0-9.]+)kbits/s""").findAll(out).lastOrNull()
-                    ?: Regex("""video:([0-9]+)KiB""").findAll(out).lastOrNull()?.let { null }
-                val kbps = kbMatch?.groupValues?.getOrNull(1)?.toDoubleOrNull()
-                if (kbps != null && kbps > 15.0) {
-                    measuredKbps += kbps
+            val cancelHandle = coroutineContext.job.invokeOnCompletion { cause ->
+                if (cause is CancellationException) {
+                    proc.destroy()
+                    if (proc.isAlive) proc.destroyForcibly()
                 }
+            }
+            try {
+                val out = proc.inputStream.bufferedReader().use { it.readText() }
+                coroutineContext.ensureActive()
+                val rc = proc.waitFor()
+                if (rc == 0) {
+                    val kbMatch = Regex("""L?size=.*bitrate=\s*([0-9.]+)kbits/s""").findAll(out).lastOrNull()
+                    val kbps = kbMatch?.groupValues?.getOrNull(1)?.toDoubleOrNull()
+                    if (kbps != null && kbps > 15.0) {
+                        measuredKbps += kbps
+                    }
+                }
+            } catch (err: Throwable) {
+                if (err is CancellationException) throw err
+            } finally {
+                cancelHandle.dispose()
+                runCatching { proc.inputStream.close() }
+                runCatching { proc.outputStream.close() }
+                runCatching { proc.errorStream.close() }
+                if (proc.isAlive) proc.destroyForcibly()
             }
         }
 
-        if (measuredKbps.isEmpty()) return@runCatching 1.0
+        if (measuredKbps.isEmpty()) return@withContext 1.0
         val avgKbps = measuredKbps.average()
         // Baseline 480p @ CRF 26 sits around ~280 kbps
         (avgKbps / 280.0).coerceIn(0.72, 1.28)
-    }.getOrDefault(1.0)
+    }
 
     private suspend fun runFfmpegPass(
         inputFile: File,
@@ -742,6 +883,7 @@ class FFmpegCliEngine(
         passMode: EncodePassMode,
         passLogPrefix: String?,
         complexityFactor: Double,
+        keepSegmentsMs: List<Pair<Long, Long>>? = null,
         onProgress: (Float, String) -> Unit
     ) {
         val args = FFmpegCommandBuilder.buildCommand(
@@ -753,7 +895,8 @@ class FFmpegCliEngine(
             bitrateMultiplier = bitrateMultiplier,
             passMode = passMode,
             passLogPrefix = passLogPrefix,
-            complexityFactor = complexityFactor
+            complexityFactor = complexityFactor,
+            keepSegmentsMs = keepSegmentsMs
         )
         val fullCommand = listOf(binaryManager.ffmpegExecutable.absolutePath) + args
 
