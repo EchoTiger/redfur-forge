@@ -13,9 +13,11 @@ import com.fissal.forge.domain.model.AudioCodecChoice
 import com.fissal.forge.domain.model.CompressMode
 import com.fissal.forge.domain.model.CompressionTier
 import com.fissal.forge.domain.model.ConvertSpec
+import com.fissal.forge.domain.model.CropSpec
 import com.fissal.forge.domain.model.MediaKind
 import com.fissal.forge.domain.model.MediaProbeResult
 import com.fissal.forge.domain.model.PipelineSpec
+import com.fissal.forge.domain.model.PixelCropRect
 import com.fissal.forge.domain.model.SilenceSkipSpec
 import com.fissal.forge.domain.model.VideoCodecChoice
 import kotlinx.coroutines.CancellationException
@@ -38,6 +40,21 @@ import kotlin.math.roundToLong
 data class VideoSampleFrameResult(
     val originalBitmap: Bitmap,
     val compressedBitmap: Bitmap,
+    val calibration: SampleCalibrationRatio
+)
+
+data class VideoReferenceExtraction(
+    val pngFile: File,
+    val referenceClipBytes: Long,
+    val width: Int,
+    val height: Int
+)
+
+data class VideoCandidateRenderResult(
+    val previewPngFile: File,
+    val width: Int,
+    val height: Int,
+    val sampleClipBytes: Long,
     val calibration: SampleCalibrationRatio
 )
 
@@ -217,108 +234,16 @@ class FFmpegCliEngine(
         var compBitmap: Bitmap? = null
 
         try {
-            val targetExt = (spec.convert?.targetExtension ?: probe.extension).lowercase(Locale.US)
-            val isGif = targetExt == "gif"
-            val effW = probe.effectiveWidth
-            val effH = probe.effectiveHeight
-            val pixelCrop = if (spec.crop != null && effW > 1 && effH > 1) {
-                AspectRatioSnapper.toEvenPixelCrop(spec.crop.rect, effW, effH)
-            } else {
-                null
-            }
-            val postCropW = pixelCrop?.width ?: effW
-            val postCropH = pixelCrop?.height ?: effH
-
-            val rawCodec = FFmpegCommandBuilder.resolveEffectiveVideoCodec(probe, spec)
-            val effectiveCodec = if (rawCodec == VideoCodecChoice.COPY) VideoCodecChoice.H264 else rawCodec
-
-            val hasAudio = probe.hasAudio &&
-                spec.trim?.muteAudio != true &&
-                spec.convert?.audioCodec != AudioCodecChoice.MUTE &&
-                !isGif
-
-            val preferOpusAudio = targetExt == "webm" ||
-                spec.convert?.audioCodec == AudioCodecChoice.OPUS ||
-                (spec.compress?.mode == CompressMode.TARGET_BYTES &&
-                    spec.compress.tier == CompressionTier.PERCEPTUAL_AV1 &&
-                    spec.convert?.audioCodec != AudioCodecChoice.AAC &&
-                    spec.convert?.audioCodec != AudioCodecChoice.MP3 &&
-                    targetExt in setOf("mp4", "mkv", "webm"))
-
-            val fullEffectiveDurationMs = computeEffectiveDurationMs(probe, spec)
-            val budgetPlan: VideoBudgetPlan? = if (
-                spec.compress?.mode == CompressMode.TARGET_BYTES &&
-                spec.compress.targetBytes != null &&
-                !isGif
-            ) {
-                BitrateBudgetCalculator.calculateVideoBudget(
-                    targetBytes = spec.compress.targetBytes.coerceAtLeast(32L * 1024L),
-                    durationMs = fullEffectiveDurationMs.coerceAtLeast(1000L),
-                    sourceWidth = postCropW,
-                    sourceHeight = postCropH,
-                    hasAudio = hasAudio,
-                    isHevc = effectiveCodec == VideoCodecChoice.HEVC,
-                    videoCodec = effectiveCodec,
-                    preferOpusAudio = preferOpusAudio
-                )
-            } else {
-                null
-            }
-
-            val requestedMaxDim = listOfNotNull(
-                spec.compress?.maxDimensionPx?.takeIf { it > 0 },
-                budgetPlan?.targetMaxDimension
-            ).minOrNull()
-
-            val finalMaxDim = if (isGif) {
-                min(540, requestedMaxDim ?: 540)
-            } else {
-                requestedMaxDim
-            }
-            val previewMaxDim = (finalMaxDim ?: 1280).coerceAtMost(1280)
-
-            val fullFinalW: Int
-            val fullFinalH: Int
-            if (postCropW > 0 && postCropH > 0) {
-                val maxPostCrop = max(postCropW, postCropH)
-                val fullScale = if (finalMaxDim != null && maxPostCrop > finalMaxDim) {
-                    finalMaxDim.toDouble() / maxPostCrop.toDouble()
-                } else {
-                    1.0
-                }
-                fullFinalW = ((postCropW * fullScale).roundToInt() and 1.inv()).coerceAtLeast(2)
-                fullFinalH = ((postCropH * fullScale).roundToInt() and 1.inv()).coerceAtLeast(2)
-            } else {
-                fullFinalW = 0
-                fullFinalH = 0
-            }
-
-            val clampedTsMs = when {
-                probe.durationMs > 1200L -> timestampMs.coerceIn(0L, probe.durationMs - 1000L)
-                probe.durationMs > 200L -> timestampMs.coerceIn(0L, probe.durationMs - 200L)
-                else -> timestampMs.coerceAtLeast(0L)
-            }
-            val sampleSec = if (probe.durationMs in 1L..999L) {
-                (probe.durationMs / 1000.0).coerceAtLeast(0.25)
-            } else {
-                1.0
-            }
-            val tsArg = String.format(Locale.US, "%.3f", clampedTsMs / 1000.0)
-            val sampleDurArg = String.format(Locale.US, "%.3f", sampleSec)
-
-            val refVfParts = mutableListOf<String>()
-            if (pixelCrop != null) {
-                refVfParts += "crop=${pixelCrop.width}:${pixelCrop.height}:${pixelCrop.x}:${pixelCrop.y}"
-            }
-            refVfParts += "scale='min($previewMaxDim,iw)':'min($previewMaxDim,ih)':force_original_aspect_ratio=decrease:force_divisible_by=2:flags=lanczos"
-            val refVf = refVfParts.joinToString(",")
+            val plan = buildVideoSamplePlan(probe = probe, spec = spec, maxPreviewCap = 1280)
+            val timing = resolveSampleTiming(probe.durationMs, timestampMs)
+            val refVf = buildReferenceFilter(plan.pixelCrop, plan.previewMaxDim)
 
             // Step A: Extract clean reference frame at timestampMs
             val origPng = File(sampleDir, "orig.png")
             runSimpleFfmpegCommand(
                 args = listOf(
                     "-nostdin", "-y", "-hide_banner", "-loglevel", "error",
-                    "-ss", tsArg,
+                    "-ss", timing.tsArg,
                     "-i", inputFile.absolutePath,
                     "-frames:v", "1",
                     "-vf", refVf,
@@ -330,93 +255,12 @@ class FFmpegCliEngine(
 
             // Step B: Encode 1.0s micro-segment using effective codec + rate control
             val compPng = File(sampleDir, "comp.png")
-            val sampleFile: File
-            if (isGif) {
-                sampleFile = File(sampleDir, "sample.gif")
-                val gifFilter = "${refVfParts.joinToString(",")},fps=15,split[s0][s1];[s0]palettegen=stats_mode=diff[p];[s1][p]paletteuse=dither=bayer:bayer_scale=5"
-                runSimpleFfmpegCommand(
-                    args = listOf(
-                        "-nostdin", "-y", "-hide_banner", "-loglevel", "error",
-                        "-ss", tsArg,
-                        "-i", inputFile.absolutePath,
-                        "-t", sampleDurArg,
-                        "-filter_complex", gifFilter,
-                        "-loop", "0",
-                        "-an", "-threads", "2",
-                        sampleFile.absolutePath
-                    ),
-                    label = "Sample GIF encode"
-                )
-            } else {
-                val sampleVfParts = mutableListOf<String>()
-                if (pixelCrop != null) {
-                    sampleVfParts += "crop=${pixelCrop.width}:${pixelCrop.height}:${pixelCrop.x}:${pixelCrop.y}"
-                }
-                if (budgetPlan?.targetFps != null) {
-                    sampleVfParts += "fps=${budgetPlan.targetFps}"
-                }
-                sampleVfParts += "scale='min($previewMaxDim,iw)':'min($previewMaxDim,ih)':force_original_aspect_ratio=decrease:force_divisible_by=2:flags=lanczos"
-                if (budgetPlan?.enableLightDenoise == true) {
-                    sampleVfParts += "hqdn3d=1.2:1.2:2.5:2.5"
-                }
-                val sampleVf = sampleVfParts.joinToString(",")
-
-                val sampleSpatialScale = if (fullFinalW > 0 && fullFinalH > 0) {
-                    val maxFinal = max(fullFinalW, fullFinalH)
-                    if (maxFinal > previewMaxDim) {
-                        val previewRatio = previewMaxDim.toDouble() / maxFinal.toDouble()
-                        (previewRatio * previewRatio).pow(0.85)
-                    } else {
-                        1.0
-                    }
-                } else {
-                    1.0
-                }
-                val sampleBitrateBps = budgetPlan?.let {
-                    (it.videoBitrateBps * sampleSpatialScale).roundToLong().coerceAtLeast(35_000L)
-                }
-                val crf = (spec.compress?.videoCrf ?: 23).coerceIn(14, 42)
-
-                var chosenCodec = effectiveCodec
-                var encodedFile = File(sampleDir, if (chosenCodec == VideoCodecChoice.VP9) "sample.webm" else "sample.mp4")
-                try {
-                    runSimpleFfmpegCommand(
-                        args = buildSampleEncodeArgs(
-                            tsArg = tsArg,
-                            inputPath = inputFile.absolutePath,
-                            sampleDurArg = sampleDurArg,
-                            sampleVf = sampleVf,
-                            codec = chosenCodec,
-                            crf = crf,
-                            sampleBitrateBps = sampleBitrateBps,
-                            outputPath = encodedFile.absolutePath
-                        ),
-                        label = "Sample video encode (${chosenCodec.name})"
-                    )
-                } catch (err: Throwable) {
-                    if (err is CancellationException) throw err
-                    if (chosenCodec == VideoCodecChoice.AV1) {
-                        chosenCodec = VideoCodecChoice.HEVC
-                        encodedFile = File(sampleDir, "sample.mp4")
-                        runSimpleFfmpegCommand(
-                            args = buildSampleEncodeArgs(
-                                tsArg = tsArg,
-                                inputPath = inputFile.absolutePath,
-                                sampleDurArg = sampleDurArg,
-                                sampleVf = sampleVf,
-                                codec = chosenCodec,
-                                crf = crf,
-                                sampleBitrateBps = sampleBitrateBps,
-                                outputPath = encodedFile.absolutePath
-                            ),
-                            label = "Sample video fallback encode (HEVC)"
-                        )
-                    } else {
-                        throw err
-                    }
-                }
-                sampleFile = encodedFile
-            }
+            val sampleFile = encodeSampleMicroClip(
+                inputFile = inputFile,
+                sampleDir = sampleDir,
+                timing = timing,
+                plan = plan
+            )
 
             // Reference 1.0s baseline micro-clip for authentic compression calibration
             val refClipFile = File(sampleDir, "ref_clip.mp4")
@@ -424,9 +268,9 @@ class FFmpegCliEngine(
                 runSimpleFfmpegCommand(
                     args = listOf(
                         "-nostdin", "-y", "-hide_banner", "-loglevel", "error",
-                        "-ss", tsArg,
+                        "-ss", timing.tsArg,
                         "-i", inputFile.absolutePath,
-                        "-t", sampleDurArg,
+                        "-t", timing.sampleDurArg,
                         "-vf", refVf,
                         "-c:v", "libx264", "-preset", "ultrafast", "-crf", "20",
                         "-pix_fmt", "yuv420p",
@@ -457,22 +301,18 @@ class FFmpegCliEngine(
             compBitmap = decodeSamplePngSafely(compPng, maxDim = 1280)
 
             val samplePixels = (origBitmap.width.toDouble() * origBitmap.height.toDouble()).coerceAtLeast(1.0)
-            val fullOutputPixels = if (fullFinalW > 0 && fullFinalH > 0) {
-                fullFinalW.toDouble() * fullFinalH.toDouble()
+            val fullOutputPixels = if (plan.fullFinalW > 0 && plan.fullFinalH > 0) {
+                plan.fullFinalW.toDouble() * plan.fullFinalH.toDouble()
             } else {
                 samplePixels
             }
             val areaScaleToFinal = (fullOutputPixels / samplePixels).coerceAtLeast(0.05)
 
             val rawCompressed = sampleFile.length().coerceAtLeast(1L)
-            val normalizedCompressed = if (sampleSec < 0.99) {
-                (rawCompressed.toDouble() / sampleSec).roundToLong().coerceAtLeast(1L)
-            } else {
-                rawCompressed
-            }
+            val normalizedCompressed = normalizeSampleBytes(rawCompressed, timing.sampleSec)
             val rawRef = refClipFile.takeIf { it.exists() && it.length() > 0L }?.length()
             val normalizedRef = if (rawRef != null) {
-                if (sampleSec < 0.99) (rawRef.toDouble() / sampleSec).roundToLong().coerceAtLeast(1L) else rawRef
+                normalizeSampleBytes(rawRef, timing.sampleSec)
             } else {
                 origPng.length().coerceAtLeast(1L)
             }
@@ -493,6 +333,423 @@ class FFmpegCliEngine(
         } finally {
             runCatching { sampleDir.deleteRecursively() }
         }
+    }
+
+    /**
+     * Extracts the baseline cropped/capped reference frame to [outputPngFile] and measures a
+     * 1-second reference clip (`libx264 -preset ultrafast -crf 20`) for Sample Lab calibration,
+     * cleaning up temporary clip artifacts deterministically.
+     */
+    suspend fun extractVideoReferenceFrameToFile(
+        inputFile: File,
+        probe: MediaProbeResult,
+        crop: CropSpec?,
+        timestampMs: Long,
+        workDir: File,
+        outputPngFile: File,
+        maxPreviewDim: Int = 1920
+    ): VideoReferenceExtraction = withContext(Dispatchers.IO) {
+        binaryManager.ensureInitialized()
+        coroutineContext.ensureActive()
+
+        workDir.mkdirs()
+        outputPngFile.parentFile?.mkdirs()
+        val tempDir = File(workDir, "ref_${System.nanoTime()}").apply { mkdirs() }
+
+        try {
+            val timing = resolveSampleTiming(probe.durationMs, timestampMs)
+            val effW = probe.effectiveWidth
+            val effH = probe.effectiveHeight
+            val pixelCrop = if (crop != null && effW > 1 && effH > 1) {
+                AspectRatioSnapper.toEvenPixelCrop(crop.rect, effW, effH)
+            } else {
+                null
+            }
+            val safeCap = maxPreviewDim.coerceAtLeast(16)
+            val refVf = buildReferenceFilter(pixelCrop, safeCap)
+
+            runSimpleFfmpegCommand(
+                args = listOf(
+                    "-nostdin", "-y", "-hide_banner", "-loglevel", "error",
+                    "-ss", timing.tsArg,
+                    "-i", inputFile.absolutePath,
+                    "-frames:v", "1",
+                    "-vf", refVf,
+                    "-an", "-threads", "2",
+                    outputPngFile.absolutePath
+                ),
+                label = "Sample Lab reference frame"
+            )
+
+            val refClipFile = File(tempDir, "ref_clip.mp4")
+            try {
+                runSimpleFfmpegCommand(
+                    args = listOf(
+                        "-nostdin", "-y", "-hide_banner", "-loglevel", "error",
+                        "-ss", timing.tsArg,
+                        "-i", inputFile.absolutePath,
+                        "-t", timing.sampleDurArg,
+                        "-vf", refVf,
+                        "-c:v", "libx264", "-preset", "ultrafast", "-crf", "20",
+                        "-pix_fmt", "yuv420p",
+                        "-an", "-threads", "2",
+                        refClipFile.absolutePath
+                    ),
+                    label = "Sample Lab reference clip"
+                )
+            } catch (err: Throwable) {
+                if (err is CancellationException) throw err
+                // Fallback to outputPngFile size if reference clip encode fails
+            }
+
+            val rawRef = refClipFile.takeIf { it.exists() && it.length() > 0L }?.length()
+            val normalizedRef = if (rawRef != null) {
+                normalizeSampleBytes(rawRef, timing.sampleSec)
+            } else {
+                outputPngFile.length().coerceAtLeast(1L)
+            }
+
+            val (decodedW, decodedH) = readImageDimensions(outputPngFile)
+            val fallbackW = (pixelCrop?.width ?: effW).coerceAtMost(safeCap)
+            val fallbackH = (pixelCrop?.height ?: effH).coerceAtMost(safeCap)
+            VideoReferenceExtraction(
+                pngFile = outputPngFile,
+                referenceClipBytes = normalizedRef,
+                width = if (decodedW > 0) decodedW else fallbackW,
+                height = if (decodedH > 0) decodedH else fallbackH
+            )
+        } finally {
+            runCatching { tempDir.deleteRecursively() }
+        }
+    }
+
+    /**
+     * Encodes an authentic micro-segment for [spec] at [timestampMs] preserving target resolution
+     * (no pre-upscale), decodes frame 0 to [outputPngFile], and deletes intermediate media files.
+     */
+    suspend fun renderVideoSampleCandidateToFile(
+        inputFile: File,
+        probe: MediaProbeResult,
+        spec: PipelineSpec,
+        timestampMs: Long,
+        workDir: File,
+        outputPngFile: File,
+        referenceClipBytes: Long,
+        maxPreviewDim: Int = 1920
+    ): VideoCandidateRenderResult = withContext(Dispatchers.IO) {
+        binaryManager.ensureInitialized()
+        coroutineContext.ensureActive()
+
+        workDir.mkdirs()
+        outputPngFile.parentFile?.mkdirs()
+        val tempDir = File(workDir, "cand_${System.nanoTime()}").apply { mkdirs() }
+
+        try {
+            val safeCap = maxPreviewDim.coerceAtLeast(16)
+            val plan = buildVideoSamplePlan(probe = probe, spec = spec, maxPreviewCap = safeCap)
+            val timing = resolveSampleTiming(probe.durationMs, timestampMs)
+
+            val sampleFile = encodeSampleMicroClip(
+                inputFile = inputFile,
+                sampleDir = tempDir,
+                timing = timing,
+                plan = plan
+            )
+
+            runSimpleFfmpegCommand(
+                args = listOf(
+                    "-nostdin", "-y", "-hide_banner", "-loglevel", "error",
+                    "-i", sampleFile.absolutePath,
+                    "-frames:v", "1",
+                    "-an", "-threads", "2",
+                    outputPngFile.absolutePath
+                ),
+                label = "Sample Lab candidate decode"
+            )
+
+            val (decodedW, decodedH) = readImageDimensions(outputPngFile)
+            val outW = if (decodedW > 0) decodedW else plan.fullFinalW
+            val outH = if (decodedH > 0) decodedH else plan.fullFinalH
+
+            val samplePixels = if (outW > 0 && outH > 0) outW.toDouble() * outH.toDouble() else 1.0
+            val fullOutputPixels = if (plan.fullFinalW > 0 && plan.fullFinalH > 0) {
+                plan.fullFinalW.toDouble() * plan.fullFinalH.toDouble()
+            } else {
+                samplePixels
+            }
+            val areaScaleToFinal = (fullOutputPixels / samplePixels).coerceAtLeast(0.05)
+
+            val rawCompressed = sampleFile.length().coerceAtLeast(1L)
+            val normalizedCompressed = normalizeSampleBytes(rawCompressed, timing.sampleSec)
+            val normalizedRef = referenceClipBytes.coerceAtLeast(1L)
+
+            VideoCandidateRenderResult(
+                previewPngFile = outputPngFile,
+                width = outW,
+                height = outH,
+                sampleClipBytes = normalizedCompressed,
+                calibration = SampleCalibrationRatio(
+                    referenceBytes = normalizedRef,
+                    compressedBytes = normalizedCompressed,
+                    areaScaleToFinal = areaScaleToFinal
+                )
+            )
+        } finally {
+            runCatching { tempDir.deleteRecursively() }
+        }
+    }
+
+    private data class VideoSampleTiming(
+        val clampedTsMs: Long,
+        val sampleSec: Double,
+        val tsArg: String,
+        val sampleDurArg: String
+    )
+
+    private data class VideoSamplePlan(
+        val isGif: Boolean,
+        val pixelCrop: PixelCropRect?,
+        val effectiveCodec: VideoCodecChoice,
+        val budgetPlan: VideoBudgetPlan?,
+        val previewMaxDim: Int,
+        val fullFinalW: Int,
+        val fullFinalH: Int,
+        val crf: Int,
+        val sampleBitrateBps: Long?
+    )
+
+    private fun resolveSampleTiming(durationMs: Long, timestampMs: Long): VideoSampleTiming {
+        val clampedTsMs = when {
+            durationMs > 1200L -> timestampMs.coerceIn(0L, durationMs - 1000L)
+            durationMs > 200L -> timestampMs.coerceIn(0L, durationMs - 200L)
+            else -> timestampMs.coerceAtLeast(0L)
+        }
+        val sampleSec = if (durationMs in 1L..999L) {
+            (durationMs / 1000.0).coerceAtLeast(0.25)
+        } else {
+            1.0
+        }
+        return VideoSampleTiming(
+            clampedTsMs = clampedTsMs,
+            sampleSec = sampleSec,
+            tsArg = String.format(Locale.US, "%.3f", clampedTsMs / 1000.0),
+            sampleDurArg = String.format(Locale.US, "%.3f", sampleSec)
+        )
+    }
+
+    private fun buildVideoSamplePlan(
+        probe: MediaProbeResult,
+        spec: PipelineSpec,
+        maxPreviewCap: Int
+    ): VideoSamplePlan {
+        val targetExt = (spec.convert?.targetExtension ?: probe.extension).lowercase(Locale.US)
+        val isGif = targetExt == "gif"
+        val effW = probe.effectiveWidth
+        val effH = probe.effectiveHeight
+        val pixelCrop = if (spec.crop != null && effW > 1 && effH > 1) {
+            AspectRatioSnapper.toEvenPixelCrop(spec.crop.rect, effW, effH)
+        } else {
+            null
+        }
+        val postCropW = pixelCrop?.width ?: effW
+        val postCropH = pixelCrop?.height ?: effH
+
+        val rawCodec = FFmpegCommandBuilder.resolveEffectiveVideoCodec(probe, spec)
+        val effectiveCodec = if (rawCodec == VideoCodecChoice.COPY) VideoCodecChoice.H264 else rawCodec
+
+        val hasAudio = probe.hasAudio &&
+            spec.trim?.muteAudio != true &&
+            spec.convert?.audioCodec != AudioCodecChoice.MUTE &&
+            !isGif
+
+        val preferOpusAudio = targetExt == "webm" ||
+            spec.convert?.audioCodec == AudioCodecChoice.OPUS ||
+            (spec.compress?.mode == CompressMode.TARGET_BYTES &&
+                spec.compress.tier == CompressionTier.PERCEPTUAL_AV1 &&
+                spec.convert?.audioCodec != AudioCodecChoice.AAC &&
+                spec.convert?.audioCodec != AudioCodecChoice.MP3 &&
+                targetExt in setOf("mp4", "mkv", "webm"))
+
+        val fullEffectiveDurationMs = computeEffectiveDurationMs(probe, spec)
+        val budgetPlan: VideoBudgetPlan? = if (
+            spec.compress?.mode == CompressMode.TARGET_BYTES &&
+            spec.compress.targetBytes != null &&
+            !isGif
+        ) {
+            BitrateBudgetCalculator.calculateVideoBudget(
+                targetBytes = spec.compress.targetBytes.coerceAtLeast(32L * 1024L),
+                durationMs = fullEffectiveDurationMs.coerceAtLeast(1000L),
+                sourceWidth = postCropW,
+                sourceHeight = postCropH,
+                hasAudio = hasAudio,
+                isHevc = effectiveCodec == VideoCodecChoice.HEVC,
+                videoCodec = effectiveCodec,
+                preferOpusAudio = preferOpusAudio
+            )
+        } else {
+            null
+        }
+
+        val requestedMaxDim = listOfNotNull(
+            spec.compress?.maxDimensionPx?.takeIf { it > 0 },
+            budgetPlan?.targetMaxDimension
+        ).minOrNull()
+
+        val finalMaxDim = if (isGif) {
+            min(540, requestedMaxDim ?: 540)
+        } else {
+            requestedMaxDim
+        }
+        val previewMaxDim = (finalMaxDim ?: maxPreviewCap).coerceAtMost(maxPreviewCap)
+
+        val fullFinalW: Int
+        val fullFinalH: Int
+        if (postCropW > 0 && postCropH > 0) {
+            val maxPostCrop = max(postCropW, postCropH)
+            val fullScale = if (finalMaxDim != null && maxPostCrop > finalMaxDim) {
+                finalMaxDim.toDouble() / maxPostCrop.toDouble()
+            } else {
+                1.0
+            }
+            fullFinalW = ((postCropW * fullScale).roundToInt() and 1.inv()).coerceAtLeast(2)
+            fullFinalH = ((postCropH * fullScale).roundToInt() and 1.inv()).coerceAtLeast(2)
+        } else {
+            fullFinalW = 0
+            fullFinalH = 0
+        }
+
+        val sampleSpatialScale = if (fullFinalW > 0 && fullFinalH > 0) {
+            val maxFinal = max(fullFinalW, fullFinalH)
+            if (maxFinal > previewMaxDim) {
+                val previewRatio = previewMaxDim.toDouble() / maxFinal.toDouble()
+                (previewRatio * previewRatio).pow(0.85)
+            } else {
+                1.0
+            }
+        } else {
+            1.0
+        }
+        val sampleBitrateBps = budgetPlan?.let {
+            (it.videoBitrateBps * sampleSpatialScale).roundToLong().coerceAtLeast(35_000L)
+        }
+        val crf = (spec.compress?.videoCrf ?: 23).coerceIn(14, 42)
+
+        return VideoSamplePlan(
+            isGif = isGif,
+            pixelCrop = pixelCrop,
+            effectiveCodec = effectiveCodec,
+            budgetPlan = budgetPlan,
+            previewMaxDim = previewMaxDim,
+            fullFinalW = fullFinalW,
+            fullFinalH = fullFinalH,
+            crf = crf,
+            sampleBitrateBps = sampleBitrateBps
+        )
+    }
+
+    private fun buildReferenceFilter(pixelCrop: PixelCropRect?, maxDim: Int): String {
+        val parts = mutableListOf<String>()
+        if (pixelCrop != null) {
+            parts += "crop=${pixelCrop.width}:${pixelCrop.height}:${pixelCrop.x}:${pixelCrop.y}"
+        }
+        parts += "scale='min($maxDim,iw)':'min($maxDim,ih)':force_original_aspect_ratio=decrease:force_divisible_by=2:flags=lanczos"
+        return parts.joinToString(",")
+    }
+
+    private suspend fun encodeSampleMicroClip(
+        inputFile: File,
+        sampleDir: File,
+        timing: VideoSampleTiming,
+        plan: VideoSamplePlan
+    ): File {
+        if (plan.isGif) {
+            val gifFile = File(sampleDir, "sample.gif")
+            val refPrefix = buildReferenceFilter(plan.pixelCrop, plan.previewMaxDim)
+            val gifFilter = "$refPrefix,fps=15,split[s0][s1];[s0]palettegen=stats_mode=diff[p];[s1][p]paletteuse=dither=bayer:bayer_scale=5"
+            runSimpleFfmpegCommand(
+                args = listOf(
+                    "-nostdin", "-y", "-hide_banner", "-loglevel", "error",
+                    "-ss", timing.tsArg,
+                    "-i", inputFile.absolutePath,
+                    "-t", timing.sampleDurArg,
+                    "-filter_complex", gifFilter,
+                    "-loop", "0",
+                    "-an", "-threads", "2",
+                    gifFile.absolutePath
+                ),
+                label = "Sample GIF encode"
+            )
+            return gifFile
+        }
+
+        val sampleVfParts = mutableListOf<String>()
+        if (plan.pixelCrop != null) {
+            sampleVfParts += "crop=${plan.pixelCrop.width}:${plan.pixelCrop.height}:${plan.pixelCrop.x}:${plan.pixelCrop.y}"
+        }
+        if (plan.budgetPlan?.targetFps != null) {
+            sampleVfParts += "fps=${plan.budgetPlan.targetFps}"
+        }
+        sampleVfParts += "scale='min(${plan.previewMaxDim},iw)':'min(${plan.previewMaxDim},ih)':force_original_aspect_ratio=decrease:force_divisible_by=2:flags=lanczos"
+        if (plan.budgetPlan?.enableLightDenoise == true) {
+            sampleVfParts += "hqdn3d=1.2:1.2:2.5:2.5"
+        }
+        val sampleVf = sampleVfParts.joinToString(",")
+
+        var chosenCodec = plan.effectiveCodec
+        var encodedFile = File(sampleDir, if (chosenCodec == VideoCodecChoice.VP9) "sample.webm" else "sample.mp4")
+        try {
+            runSimpleFfmpegCommand(
+                args = buildSampleEncodeArgs(
+                    tsArg = timing.tsArg,
+                    inputPath = inputFile.absolutePath,
+                    sampleDurArg = timing.sampleDurArg,
+                    sampleVf = sampleVf,
+                    codec = chosenCodec,
+                    crf = plan.crf,
+                    sampleBitrateBps = plan.sampleBitrateBps,
+                    outputPath = encodedFile.absolutePath
+                ),
+                label = "Sample video encode (${chosenCodec.name})"
+            )
+        } catch (err: Throwable) {
+            if (err is CancellationException) throw err
+            if (chosenCodec == VideoCodecChoice.AV1) {
+                chosenCodec = VideoCodecChoice.HEVC
+                encodedFile = File(sampleDir, "sample.mp4")
+                runSimpleFfmpegCommand(
+                    args = buildSampleEncodeArgs(
+                        tsArg = timing.tsArg,
+                        inputPath = inputFile.absolutePath,
+                        sampleDurArg = timing.sampleDurArg,
+                        sampleVf = sampleVf,
+                        codec = chosenCodec,
+                        crf = plan.crf,
+                        sampleBitrateBps = plan.sampleBitrateBps,
+                        outputPath = encodedFile.absolutePath
+                    ),
+                    label = "Sample video fallback encode (HEVC)"
+                )
+            } else {
+                throw err
+            }
+        }
+        return encodedFile
+    }
+
+    private fun normalizeSampleBytes(rawBytes: Long, sampleSec: Double): Long {
+        val safeRaw = rawBytes.coerceAtLeast(1L)
+        return if (sampleSec < 0.99) {
+            (safeRaw.toDouble() / sampleSec).roundToLong().coerceAtLeast(1L)
+        } else {
+            safeRaw
+        }
+    }
+
+    private fun readImageDimensions(file: File): Pair<Int, Int> {
+        if (!file.exists() || file.length() <= 0L) return 0 to 0
+        val opts = BitmapFactory.Options().apply { inJustDecodeBounds = true }
+        BitmapFactory.decodeFile(file.absolutePath, opts)
+        return opts.outWidth.coerceAtLeast(0) to opts.outHeight.coerceAtLeast(0)
     }
 
     private fun buildSampleEncodeArgs(

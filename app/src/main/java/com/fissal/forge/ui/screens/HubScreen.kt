@@ -31,6 +31,7 @@ import androidx.compose.material.icons.rounded.Bolt
 import androidx.compose.material.icons.rounded.CheckCircle
 import androidx.compose.material.icons.rounded.Clear
 import androidx.compose.material.icons.rounded.Close
+import androidx.compose.material.icons.rounded.Compare
 import androidx.compose.material.icons.rounded.ContentCopy
 import androidx.compose.material.icons.rounded.ContentPaste
 import androidx.compose.material.icons.rounded.Download
@@ -151,6 +152,7 @@ fun HubScreen(
     onApplyQuickBatchPreset: ((LinkItemSettings) -> LinkItemSettings) -> Unit,
     onQueueBatch: (copyToClipboard: Boolean, saveToDevice: Boolean) -> Unit,
     onPickFilesClick: () -> Unit,
+    onOpenSampleLabPicker: () -> Unit,
     onOpenQueueClick: () -> Unit,
     onCancelAll: () -> Unit,
     onRemovePlaylistGroup: (String) -> Unit,
@@ -192,7 +194,10 @@ fun HubScreen(
 
         // 2. Local Studio Entry Card (Images, RAW, Audio, Video)
         item(key = "local_studio_card") {
-            LocalStudioHeroCard(onPickFilesClick = onPickFilesClick)
+            LocalStudioHeroCard(
+                onPickFilesClick = onPickFilesClick,
+                onOpenSampleLabPicker = onOpenSampleLabPicker
+            )
         }
 
         // 3. Batch URL Input & Quick Global Batch Presets (Arc-Relay Domain)
@@ -715,57 +720,111 @@ private fun PipelineStageTile(
 }
 
 @Composable
-private fun LocalStudioHeroCard(onPickFilesClick: () -> Unit) {
+private fun LocalStudioHeroCard(
+    onPickFilesClick: () -> Unit,
+    onOpenSampleLabPicker: () -> Unit
+) {
     WorkshopDomainCard(
         domain = EngineDomain.FORGE,
         isActive = false,
         onClick = onPickFilesClick,
         contentPadding = PaddingValues(16.dp)
     ) {
-        Row(
-            modifier = Modifier.fillMaxWidth(),
-            verticalAlignment = Alignment.CenterVertically,
-            horizontalArrangement = Arrangement.spacedBy(14.dp)
-        ) {
-            Surface(
-                color = FurnaceCard,
-                border = BorderStroke(1.dp, ForgeBevelOutline),
-                shape = RoundedCornerShape(14.dp),
-                modifier = Modifier.size(48.dp)
+        Column(verticalArrangement = Arrangement.spacedBy(12.dp)) {
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                verticalAlignment = Alignment.CenterVertically,
+                horizontalArrangement = Arrangement.spacedBy(14.dp)
             ) {
-                Box(contentAlignment = Alignment.Center) {
-                    Icon(
-                        imageVector = Icons.Rounded.FolderOpen,
-                        contentDescription = null,
-                        tint = EmberFlame,
-                        modifier = Modifier.size(24.dp)
-                    )
-                }
-            }
-            Column(modifier = Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(4.dp)) {
-                Row(
-                    verticalAlignment = Alignment.CenterVertically,
-                    horizontalArrangement = Arrangement.spacedBy(8.dp)
+                Surface(
+                    color = FurnaceCard,
+                    border = BorderStroke(1.dp, ForgeBevelOutline),
+                    shape = RoundedCornerShape(14.dp),
+                    modifier = Modifier.size(48.dp)
                 ) {
-                    Text(
-                        text = "Local & RAW Studio",
-                        style = MaterialTheme.typography.titleMedium,
-                        color = CrispWhite,
-                        fontWeight = FontWeight.SemiBold
-                    )
-                    DomainRolePill(domain = EngineDomain.FORGE, label = "Local Forge")
+                    Box(contentAlignment = Alignment.Center) {
+                        Icon(
+                            imageVector = Icons.Rounded.FolderOpen,
+                            contentDescription = null,
+                            tint = EmberFlame,
+                            modifier = Modifier.size(24.dp)
+                        )
+                    }
                 }
-                Text(
-                    text = "Convert, compress to target MB (AV1/HEVC/Opus), trim & snap-crop photos, RAW, audio, or video",
-                    style = MaterialTheme.typography.bodySmall,
-                    color = MutedSteel
+                Column(modifier = Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(4.dp)) {
+                    Row(
+                        verticalAlignment = Alignment.CenterVertically,
+                        horizontalArrangement = Arrangement.spacedBy(8.dp)
+                    ) {
+                        Text(
+                            text = "Local & RAW Studio",
+                            style = MaterialTheme.typography.titleMedium,
+                            color = CrispWhite,
+                            fontWeight = FontWeight.SemiBold
+                        )
+                        DomainRolePill(domain = EngineDomain.FORGE, label = "Local Forge")
+                    }
+                    Text(
+                        text = "Convert, compress to target MB (AV1/HEVC/Opus), trim & snap-crop photos, RAW, audio, or video",
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MutedSteel
+                    )
+                }
+                Icon(
+                    imageVector = Icons.Rounded.Tune,
+                    contentDescription = "Open Studio",
+                    tint = EmberFlame
                 )
             }
-            Icon(
-                imageVector = Icons.Rounded.Tune,
-                contentDescription = "Open Studio",
-                tint = EmberFlame
-            )
+
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.spacedBy(8.dp),
+                verticalAlignment = Alignment.CenterVertically
+            ) {
+                OutlinedButton(
+                    onClick = onPickFilesClick,
+                    shape = RoundedCornerShape(12.dp),
+                    border = BorderStroke(1.dp, ForgeBevelOutline),
+                    contentPadding = PaddingValues(horizontal = 12.dp, vertical = 8.dp),
+                    modifier = Modifier.weight(1f)
+                ) {
+                    Icon(
+                        imageVector = Icons.Rounded.Tune,
+                        contentDescription = null,
+                        tint = SecundaSilver,
+                        modifier = Modifier.size(16.dp)
+                    )
+                    Spacer(Modifier.width(6.dp))
+                    Text(
+                        text = "Open Studio",
+                        style = MaterialTheme.typography.labelLarge,
+                        color = CrispWhite,
+                        maxLines = 1
+                    )
+                }
+                OutlinedButton(
+                    onClick = onOpenSampleLabPicker,
+                    shape = RoundedCornerShape(12.dp),
+                    border = BorderStroke(1.dp, EmberFlame.copy(alpha = 0.65f)),
+                    contentPadding = PaddingValues(horizontal = 12.dp, vertical = 8.dp),
+                    modifier = Modifier.weight(1.15f)
+                ) {
+                    Icon(
+                        imageVector = Icons.Rounded.Compare,
+                        contentDescription = null,
+                        tint = EmberFlame,
+                        modifier = Modifier.size(16.dp)
+                    )
+                    Spacer(Modifier.width(6.dp))
+                    Text(
+                        text = "Sample Frame Lab",
+                        style = MaterialTheme.typography.labelLarge,
+                        color = EmberFlame,
+                        maxLines = 1
+                    )
+                }
+            }
         }
     }
 }

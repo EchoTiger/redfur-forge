@@ -1,6 +1,13 @@
 package com.fissal.forge.domain.model
 
 import kotlinx.serialization.Serializable
+import kotlinx.serialization.encodeToString
+import kotlinx.serialization.json.Json
+
+private val presetNormalizationJson = Json {
+    ignoreUnknownKeys = true
+    encodeDefaults = true
+}
 
 @Serializable
 enum class AspectPreset(val label: String, val ratioW: Int?, val ratioH: Int?) {
@@ -213,4 +220,31 @@ data class PipelineSpec(
         else if (delivery.copyToClipboard) parts += "+Clipboard"
         return if (parts.isEmpty()) "Passthrough" else parts.joinToString(" • ")
     }
+
+    /**
+     * Returns a reusable format-preset copy of this pipeline with source-specific URL, crop,
+     * trim timestamps, and per-file delivery filenames stripped, while preserving codec, target,
+     * filter flags, and metadata-strip preferences.
+     */
+    fun sanitizeForPreset(): PipelineSpec {
+        val cleanTrim = trim?.let { tr ->
+            if (tr.fastKeyframeCopy || tr.fadeInOut || tr.muteAudio || tr.silenceSkip?.enabled == true) {
+                tr.copy(startMs = 0L, endMs = null)
+            } else {
+                null
+            }
+        }
+        return copy(
+            download = null,
+            trim = cleanTrim,
+            crop = null,
+            delivery = DeliverySpec(stripMetadata = delivery.stripMetadata)
+        )
+    }
+
+    /**
+     * Serializes the sanitized preset form of this pipeline into deterministic JSON for Room
+     * persistence and cross-session comparison.
+     */
+    fun toNormalizedJson(): String = presetNormalizationJson.encodeToString(sanitizeForPreset())
 }

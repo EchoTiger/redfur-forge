@@ -1,5 +1,6 @@
 package com.fissal.forge.ui.screens
 
+import androidx.activity.compose.BackHandler
 import androidx.compose.foundation.BorderStroke
 import androidx.compose.foundation.Image
 import androidx.compose.foundation.background
@@ -67,6 +68,7 @@ import androidx.compose.ui.text.input.KeyboardType
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import com.fissal.forge.data.local.ForgeJobEntity
+import com.fissal.forge.data.local.FormatPresetEntity
 import com.fissal.forge.data.local.JobStatus
 import com.fissal.forge.domain.logic.AspectRatioSnapper
 import com.fissal.forge.domain.logic.BitrateBudgetCalculator
@@ -87,6 +89,7 @@ import com.fissal.forge.ui.StudioSessionState
 import com.fissal.forge.ui.StudioToolTab
 import com.fissal.forge.ui.components.CropCanvasOverlay
 import com.fissal.forge.ui.components.DomainRolePill
+import com.fissal.forge.ui.components.EmojiPresetStrip
 import com.fissal.forge.ui.components.EngineDomain
 import com.fissal.forge.ui.components.ForgeInfoTipButton
 import com.fissal.forge.ui.components.ForgePrimaryButton
@@ -121,11 +124,17 @@ private val SampleActiveBadgeBg = Color(0xFFC43419)
 fun StudioEditorScreen(
     state: StudioSessionState,
     jobs: List<ForgeJobEntity>,
+    presets: List<FormatPresetEntity>,
     deviceCapabilities: DeviceCapabilityReport,
     buildSpecForItem: (probe: MediaProbeResult, cfg: StudioItemConfig, forceCompressSpec: Boolean) -> PipelineSpec,
     onUpdate: ((StudioItemConfig) -> StudioItemConfig) -> Unit,
     onSelectTab: (StudioToolTab) -> Unit,
     onToggleSamplePreview: () -> Unit,
+    onOpenSampleLab: () -> Unit,
+    onApplyPreset: (FormatPresetEntity) -> Unit,
+    onOpenSavePresetDialog: (suggestedName: String, spec: PipelineSpec) -> Unit,
+    onTogglePresetDefault: (FormatPresetEntity) -> Unit,
+    onDeletePreset: (FormatPresetEntity) -> Unit,
     onClearInlineWatch: () -> Unit,
     onSelectBatchItem: (Int) -> Unit,
     onApplySameType: () -> Unit,
@@ -135,6 +144,7 @@ fun StudioEditorScreen(
     onRunInBackground: () -> Unit,
     onClose: () -> Unit
 ) {
+    BackHandler(onBack = onClose)
     val primary = state.primaryItem
     val availableTabs = remember(primary.mediaKind) {
         buildList {
@@ -438,6 +448,48 @@ fun StudioEditorScreen(
                     }
                 }
 
+                if (primary.isVisual) {
+                    OutlinedButton(
+                        onClick = onOpenSampleLab,
+                        shape = RoundedCornerShape(14.dp),
+                        border = BorderStroke(1.dp, EmberFlame.copy(alpha = 0.72f)),
+                        contentPadding = PaddingValues(horizontal = 14.dp, vertical = 10.dp),
+                        modifier = Modifier.fillMaxWidth()
+                    ) {
+                        Icon(
+                            imageVector = Icons.Rounded.Compare,
+                            contentDescription = null,
+                            tint = EmberFlame,
+                            modifier = Modifier.size(18.dp)
+                        )
+                        Spacer(Modifier.width(8.dp))
+                        Text(
+                            text = "Open Sample Frame Lab (Multi-Config Compare)",
+                            style = MaterialTheme.typography.labelLarge,
+                            color = CrispWhite
+                        )
+                    }
+                }
+
+                EmojiPresetStrip(
+                    mediaKind = primary.mediaKind,
+                    presets = presets,
+                    onApplyPreset = onApplyPreset,
+                    onSaveCurrentAsPreset = {
+                        val defaultTitle = if (activeSpec.compress?.mode == CompressMode.TARGET_BYTES &&
+                            activeSpec.compress.targetBytes != null
+                        ) {
+                            "${state.targetExtension.uppercase()} ≤ ${state.targetMbText}MB"
+                        } else {
+                            "${state.targetExtension.uppercase()} Custom"
+                        }
+                        onOpenSavePresetDialog(defaultTitle, activeSpec)
+                    },
+                    onToggleDefaultForKind = onTogglePresetDefault,
+                    onDeletePreset = onDeletePreset,
+                    actionLabel = "Save Emoji Preset"
+                )
+
                 // Combinable 4-Tool Selector Chips
                 FlowRow(
                     horizontalArrangement = Arrangement.spacedBy(8.dp),
@@ -539,6 +591,7 @@ fun StudioEditorScreen(
                                 previewEstimate = compressPreviewEstimate,
                                 deviceCapabilities = deviceCapabilities,
                                 onToggleSamplePreview = onToggleSamplePreview,
+                                onOpenSampleLab = onOpenSampleLab,
                                 onUpdate = onUpdate
                             )
                             StudioToolTab.TRIM -> TrimPanel(state, deviceCapabilities, onUpdate)
@@ -793,6 +846,7 @@ private fun CompressPanel(
     previewEstimate: EstimatedSizeResult,
     deviceCapabilities: DeviceCapabilityReport,
     onToggleSamplePreview: () -> Unit,
+    onOpenSampleLab: () -> Unit,
     onUpdate: ((StudioItemConfig) -> StudioItemConfig) -> Unit
 ) {
     val primary = state.primaryItem
@@ -955,6 +1009,27 @@ private fun CompressPanel(
                     LiveSizeEstimateBadge(
                         estimate = previewEstimate,
                         domain = EngineDomain.FORGE
+                    )
+                }
+
+                OutlinedButton(
+                    onClick = onOpenSampleLab,
+                    shape = RoundedCornerShape(10.dp),
+                    border = BorderStroke(1.dp, EmberFlame.copy(alpha = 0.55f)),
+                    contentPadding = PaddingValues(horizontal = 12.dp, vertical = 6.dp),
+                    modifier = Modifier.fillMaxWidth()
+                ) {
+                    Icon(
+                        imageVector = Icons.Rounded.Compare,
+                        contentDescription = null,
+                        tint = EmberFlame,
+                        modifier = Modifier.size(16.dp)
+                    )
+                    Spacer(Modifier.width(6.dp))
+                    Text(
+                        text = "Compare Multiple Configs in Fullscreen Sample Lab",
+                        style = MaterialTheme.typography.labelMedium,
+                        color = EmberFlame
                     )
                 }
             }

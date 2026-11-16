@@ -21,8 +21,10 @@ import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.Row
+import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
+import androidx.compose.foundation.layout.navigationBarsPadding
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.shape.RoundedCornerShape
@@ -67,12 +69,17 @@ import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.core.content.ContextCompat
 import com.fissal.forge.auth.ServiceDescriptor
+import com.fissal.forge.domain.model.MediaKind
+import com.fissal.forge.domain.model.PipelineSpec
 import com.fissal.forge.ui.ForgeViewModel
 import com.fissal.forge.ui.MainTab
 import com.fissal.forge.ui.components.AuthRequiredPromptDialog
 import com.fissal.forge.ui.components.AuthWebViewDialog
+import com.fissal.forge.ui.components.EmojiPresetPickerDialog
+import com.fissal.forge.ui.screens.FullscreenSampleComparator
 import com.fissal.forge.ui.screens.HubScreen
 import com.fissal.forge.ui.screens.QueueScreen
+import com.fissal.forge.ui.screens.SampleLabScreen
 import com.fissal.forge.ui.screens.SettingsScreen
 import com.fissal.forge.ui.screens.StudioEditorScreen
 import com.fissal.forge.ui.theme.AmberActive
@@ -116,6 +123,8 @@ class MainActivity : ComponentActivity() {
                 val urlBatchText by viewModel.urlBatchText.collectAsState()
                 val resolvedLinks by viewModel.resolvedLinks.collectAsState()
                 val studioSession by viewModel.studioSession.collectAsState()
+                val sampleLabSession by viewModel.sampleLabSession.collectAsState()
+                val formatPresets by viewModel.formatPresets.collectAsState()
                 val ytDlpVersion by viewModel.ytDlpVersion.collectAsState()
                 val isUpdatingYtDlp by viewModel.isUpdatingYtDlp.collectAsState()
                 val cacheSizeBytes by viewModel.cacheSizeBytes.collectAsState()
@@ -200,6 +209,26 @@ class MainActivity : ComponentActivity() {
                     }
                 }
 
+                val sampleLabFilePicker = rememberLauncherForActivityResult(
+                    contract = ActivityResultContracts.OpenMultipleDocuments()
+                ) { uris ->
+                    if (uris.isNotEmpty()) {
+                        uris.forEach { uri ->
+                            runCatching {
+                                contentResolver.takePersistableUriPermission(
+                                    uri,
+                                    Intent.FLAG_GRANT_READ_URI_PERMISSION
+                                )
+                            }
+                        }
+                        viewModel.openSampleLabForUris(uris)
+                    }
+                }
+
+                var pendingPresetSave by remember {
+                    mutableStateOf<Triple<MediaKind, String, PipelineSpec>?>(null)
+                }
+
                 var activeAuthWebViewSession by remember {
                     mutableStateOf<Triple<ServiceDescriptor, String?, String?>?>(null)
                 }
@@ -217,252 +246,343 @@ class MainActivity : ComponentActivity() {
                     }
                 }
 
+                val currentSampleLab = sampleLabSession
                 val currentStudio = studioSession
-                if (currentStudio != null) {
-                    StudioEditorScreen(
-                        state = currentStudio,
-                        jobs = jobs,
-                        deviceCapabilities = deviceCapabilities,
-                        buildSpecForItem = { probe, cfg, forceCompress ->
-                            viewModel.buildPipelineSpecForStudioItem(
-                                probe = probe,
-                                cfg = cfg,
-                                forceCompressSpec = forceCompress
-                            )
-                        },
-                        onUpdate = viewModel::updateStudio,
-                        onSelectTab = viewModel::updateStudioTab,
-                        onToggleSamplePreview = viewModel::toggleSamplePreviewComparison,
-                        onClearInlineWatch = viewModel::clearInlineWatchJobs,
-                        onSelectBatchItem = viewModel::selectStudioItem,
-                        onApplySameType = viewModel::applyStudioToSameType,
-                        onApplyAll = viewModel::applyStudioToAll,
-                        onSelectCropPreset = viewModel::selectStudioCropPreset,
-                        onExecute = viewModel::enqueueStudioSession,
-                        onRunInBackground = viewModel::moveInlineStudioToBackground,
-                        onClose = viewModel::closeStudioSession
-                    )
-                } else {
-                    Scaffold(
-                        containerColor = VolcanicObsidian,
-                        snackbarHost = { SnackbarHost(snackbarHostState) },
-                        topBar = {
-                            TopAppBar(
-                                colors = TopAppBarDefaults.topAppBarColors(containerColor = AnvilGunmetal),
-                                title = {
-                                    Row(
-                                        verticalAlignment = Alignment.CenterVertically,
-                                        horizontalArrangement = Arrangement.spacedBy(10.dp)
-                                    ) {
-                                        Image(
-                                            painter = painterResource(id = R.drawable.ic_forge_fissal_emblem),
-                                            contentDescription = "Forge Fissal emblem",
-                                            modifier = Modifier.size(32.dp)
+                Box(modifier = Modifier.fillMaxSize()) {
+                    if (currentSampleLab != null && currentSampleLab.isFullscreenCompareOpen) {
+                        FullscreenSampleComparator(
+                            probe = currentSampleLab.probe,
+                            tabs = currentSampleLab.buildComparatorTabs(),
+                            renderedResults = currentSampleLab.renderedResults,
+                            activeTabId = currentSampleLab.fullscreenActiveTabId,
+                            onSelectTab = viewModel::selectFullscreenComparatorTab,
+                            onVote = viewModel::voteSampleLabCandidate,
+                            onRemoveCandidate = viewModel::removeSampleLabCandidate,
+                            onSaveAsPreset = { _, suggestedName, spec ->
+                                pendingPresetSave = Triple(currentSampleLab.probe.mediaKind, suggestedName, spec)
+                            },
+                            onUseConfigInStudio = viewModel::useSampleCandidateInStudio,
+                            onClose = viewModel::closeFullscreenComparator
+                        )
+                    } else if (currentSampleLab != null) {
+                        SampleLabScreen(
+                            probe = currentSampleLab.probe,
+                            timestampMs = currentSampleLab.timestampMs,
+                            includeOriginalFrame = currentSampleLab.includeOriginalFrame,
+                            candidates = currentSampleLab.candidates,
+                            renderedResults = currentSampleLab.renderedResults,
+                            referencePreviewPath = currentSampleLab.referencePreviewPath,
+                            isPreparingBaseline = currentSampleLab.isPreparingBaseline,
+                            isRenderingSamples = currentSampleLab.isRenderingSamples,
+                            baselineError = currentSampleLab.baselineError,
+                            presets = formatPresets,
+                            onTimestampChange = viewModel::updateSampleLabTimestamp,
+                            onRandomTimestamp = viewModel::rollRandomSampleLabTimestamp,
+                            onToggleIncludeOriginal = viewModel::setSampleLabIncludeOriginal,
+                            onSuggestBestConfig = viewModel::suggestBestSampleConfig,
+                            onRenderAll = viewModel::renderAllSampleLabCandidates,
+                            onRetryBaseline = viewModel::retrySampleLabBaseline,
+                            onOpenFullscreenCompare = viewModel::openFullscreenComparator,
+                            onAddCandidate = { viewModel.addSampleLabCandidate() },
+                            onApplyPresetAsCandidate = viewModel::addPresetAsSampleLabCandidate,
+                            onTogglePresetDefault = viewModel::toggleFormatPresetDefault,
+                            onDeletePreset = viewModel::deleteFormatPreset,
+                            onOpenSavePresetDialog = { suggestedName, spec ->
+                                pendingPresetSave = Triple(currentSampleLab.probe.mediaKind, suggestedName, spec)
+                            },
+                            onUpdateCandidateDraft = viewModel::updateSampleLabCandidateDraft,
+                            onRenderSingleCandidate = viewModel::renderSingleSampleLabCandidate,
+                            onRemoveCandidate = viewModel::removeSampleLabCandidate,
+                            onVoteCandidate = viewModel::voteSampleLabCandidate,
+                            onUseConfigInStudio = viewModel::useSampleCandidateInStudio,
+                            onClose = viewModel::closeSampleLab
+                        )
+                    } else if (currentStudio != null) {
+                        StudioEditorScreen(
+                            state = currentStudio,
+                            jobs = jobs,
+                            presets = formatPresets,
+                            deviceCapabilities = deviceCapabilities,
+                            buildSpecForItem = { probe, cfg, forceCompress ->
+                                viewModel.buildPipelineSpecForStudioItem(
+                                    probe = probe,
+                                    cfg = cfg,
+                                    forceCompressSpec = forceCompress
+                                )
+                            },
+                            onUpdate = viewModel::updateStudio,
+                            onSelectTab = viewModel::updateStudioTab,
+                            onToggleSamplePreview = viewModel::toggleSamplePreviewComparison,
+                            onOpenSampleLab = viewModel::openSampleLabFromStudio,
+                            onApplyPreset = viewModel::applyPresetToStudio,
+                            onOpenSavePresetDialog = { suggestedName, spec ->
+                                pendingPresetSave = Triple(currentStudio.primaryItem.mediaKind, suggestedName, spec)
+                            },
+                            onTogglePresetDefault = viewModel::toggleFormatPresetDefault,
+                            onDeletePreset = viewModel::deleteFormatPreset,
+                            onClearInlineWatch = viewModel::clearInlineWatchJobs,
+                            onSelectBatchItem = viewModel::selectStudioItem,
+                            onApplySameType = viewModel::applyStudioToSameType,
+                            onApplyAll = viewModel::applyStudioToAll,
+                            onSelectCropPreset = viewModel::selectStudioCropPreset,
+                            onExecute = viewModel::enqueueStudioSession,
+                            onRunInBackground = viewModel::moveInlineStudioToBackground,
+                            onClose = viewModel::closeStudioSession
+                        )
+                    } else {
+                        Scaffold(
+                            containerColor = VolcanicObsidian,
+                            snackbarHost = { SnackbarHost(snackbarHostState) },
+                            topBar = {
+                                TopAppBar(
+                                    colors = TopAppBarDefaults.topAppBarColors(containerColor = AnvilGunmetal),
+                                    title = {
+                                        Row(
+                                            verticalAlignment = Alignment.CenterVertically,
+                                            horizontalArrangement = Arrangement.spacedBy(10.dp)
+                                        ) {
+                                            Image(
+                                                painter = painterResource(id = R.drawable.ic_forge_fissal_emblem),
+                                                contentDescription = "Forge Fissal emblem",
+                                                modifier = Modifier.size(32.dp)
+                                            )
+                                            Text(
+                                                text = when (selectedTab) {
+                                                    MainTab.FORGE -> "Redfur Forge"
+                                                    MainTab.QUEUE -> "Pipeline Queue"
+                                                    MainTab.SETTINGS -> "Forge Settings"
+                                                },
+                                                style = MaterialTheme.typography.headlineSmall,
+                                                color = CrispWhite
+                                            )
+                                        }
+                                    }
+                                )
+                            },
+                            bottomBar = {
+                                NavigationBar(containerColor = AnvilGunmetal) {
+                                    NavigationBarItem(
+                                        selected = selectedTab == MainTab.FORGE,
+                                        onClick = { viewModel.selectTab(MainTab.FORGE) },
+                                        icon = { Icon(Icons.Rounded.AutoAwesome, contentDescription = null) },
+                                        label = { Text("Forge") },
+                                        colors = NavigationBarItemDefaults.colors(
+                                            selectedIconColor = EmberFlame,
+                                            selectedTextColor = EmberFlame,
+                                            indicatorColor = FurnaceCard,
+                                            unselectedIconColor = MutedSteel,
+                                            unselectedTextColor = MutedSteel
                                         )
-                                        Text(
-                                            text = when (selectedTab) {
-                                                MainTab.FORGE -> "Redfur Forge"
-                                                MainTab.QUEUE -> "Pipeline Queue"
-                                                MainTab.SETTINGS -> "Forge Settings"
+                                    )
+                                    NavigationBarItem(
+                                        selected = selectedTab == MainTab.QUEUE,
+                                        onClick = { viewModel.selectTab(MainTab.QUEUE) },
+                                        icon = {
+                                            BadgedBox(
+                                                badge = {
+                                                    if (metrics.totalActiveJobs > 0) {
+                                                        Badge(
+                                                            containerColor = MasserCrimson,
+                                                            contentColor = ObsidianBg
+                                                        ) {
+                                                            Text(metrics.totalActiveJobs.toString())
+                                                        }
+                                                    }
+                                                }
+                                            ) {
+                                                Icon(Icons.AutoMirrored.Rounded.List, contentDescription = null)
+                                            }
+                                        },
+                                        label = { Text("Queue") },
+                                        colors = NavigationBarItemDefaults.colors(
+                                            selectedIconColor = EmberFlame,
+                                            selectedTextColor = EmberFlame,
+                                            indicatorColor = FurnaceCard,
+                                            unselectedIconColor = MutedSteel,
+                                            unselectedTextColor = MutedSteel
+                                        )
+                                    )
+                                    NavigationBarItem(
+                                        selected = selectedTab == MainTab.SETTINGS,
+                                        onClick = { viewModel.selectTab(MainTab.SETTINGS) },
+                                        icon = { Icon(Icons.Rounded.Settings, contentDescription = null) },
+                                        label = { Text("Settings") },
+                                        colors = NavigationBarItemDefaults.colors(
+                                            selectedIconColor = EmberFlame,
+                                            selectedTextColor = EmberFlame,
+                                            indicatorColor = FurnaceCard,
+                                            unselectedIconColor = MutedSteel,
+                                            unselectedTextColor = MutedSteel
+                                        )
+                                    )
+                                }
+                            }
+                        ) { innerPadding ->
+                            Column(modifier = Modifier.padding(innerPadding)) {
+                                AppUpdateBanner(
+                                    updateState = appUpdateState,
+                                    dismissedTag = settings.dismissedUpdateTag,
+                                    onStartUpdate = { viewModel.startAppUpdate(autoInstallAfter = true) },
+                                    onCancelDownload = viewModel::cancelAppUpdate,
+                                    onInstallNow = { launchOrRequestInstall() },
+                                    onDismiss = { tag -> viewModel.dismissUpdateBanner(tag) }
+                                )
+
+                                Box(modifier = Modifier.weight(1f)) {
+                                    when (selectedTab) {
+                                        MainTab.FORGE -> HubScreen(
+                                            urlBatchText = urlBatchText,
+                                            resolvedLinks = resolvedLinks,
+                                            jobs = jobs,
+                                            metrics = metrics,
+                                            settings = settings,
+                                            deviceCapabilities = deviceCapabilities,
+                                            onUrlTextChange = viewModel::updateUrlBatchText,
+                                            onPasteClick = viewModel::pasteUrlsFromClipboard,
+                                            onToggleChipExpand = viewModel::toggleLinkChipExpanded,
+                                            onRetryResolveLink = viewModel::retryResolveLink,
+                                            onRemoveChip = viewModel::removeResolvedLink,
+                                            onUpdateChipSettings = viewModel::updateLinkChipSettings,
+                                            onTogglePlaylistTrack = viewModel::togglePlaylistTrack,
+                                            onSetAllPlaylistTracks = viewModel::setAllPlaylistTracks,
+                                            onSetSplitByChapters = viewModel::setSplitByChapters,
+                                            onToggleChapterTrack = viewModel::toggleChapterTrack,
+                                            onSetAllChapterTracks = viewModel::setAllChapterTracks,
+                                            onSetBulkChapterMode = viewModel::setBulkChapterMode,
+                                            onToggleChapterTrackModeOverride = viewModel::toggleChapterTrackModeOverride,
+                                            onSetChapterTrackAudioFormat = viewModel::setChapterTrackAudioFormat,
+                                            onApplyToSameType = viewModel::applySettingsToSameType,
+                                            onApplyToSameSite = viewModel::applySettingsToSameSite,
+                                            onApplyToAllLinks = viewModel::applySettingsToAllLinks,
+                                            onApplyQuickBatchPreset = viewModel::applyQuickBatchPreset,
+                                            onQueueBatch = viewModel::queueResolvedBatch,
+                                            onPickFilesClick = { multiFilePicker.launch(arrayOf("*/*")) },
+                                            onOpenSampleLabPicker = {
+                                                sampleLabFilePicker.launch(arrayOf("video/*", "image/*", "*/*"))
                                             },
-                                            style = MaterialTheme.typography.headlineSmall,
-                                            color = CrispWhite
+                                            onOpenQueueClick = { viewModel.selectTab(MainTab.QUEUE) },
+                                            onCancelAll = viewModel::cancelAllJobs,
+                                            onRemovePlaylistGroup = viewModel::removePlaylistGroup,
+                                            onPromptSignInForChip = viewModel::promptSignInForChip
+                                        )
+                                        MainTab.QUEUE -> QueueScreen(
+                                            jobs = jobs,
+                                            metrics = metrics,
+                                            onCopyJob = viewModel::copyCompletedJobToClipboard,
+                                            onShareJob = viewModel::buildShareIntentForJob,
+                                            onCancelJob = viewModel::cancelJob,
+                                            onRetryJob = viewModel::retryJob,
+                                            onRemoveJob = viewModel::removeJob,
+                                            onCancelPlaylistGroup = viewModel::cancelPlaylistGroup,
+                                            onRemovePlaylistGroup = viewModel::removePlaylistGroup,
+                                            onRetryPlaylistGroup = viewModel::retryPlaylistGroup,
+                                            onCancelAll = viewModel::cancelAllJobs,
+                                            onClearFinished = viewModel::clearFinishedJobs
+                                        )
+                                        MainTab.SETTINGS -> SettingsScreen(
+                                            settings = settings,
+                                            ytDlpVersion = ytDlpVersion,
+                                            isUpdatingYtDlp = isUpdatingYtDlp,
+                                            cacheSizeBytes = cacheSizeBytes,
+                                            appUpdateState = appUpdateState,
+                                            deviceCapabilities = deviceCapabilities,
+                                            siteConnections = siteConnections,
+                                            checkingServiceId = checkingServiceId,
+                                            onCheckAppUpdate = viewModel::checkForAppUpdates,
+                                            onStartAppUpdate = { viewModel.startAppUpdate(autoInstallAfter = true) },
+                                            onCancelAppUpdate = viewModel::cancelAppUpdate,
+                                            onInstallAppUpdate = { launchOrRequestInstall() },
+                                            onCaptureWebViewSession = { service, ua, visitedUrls ->
+                                                viewModel.completeWebViewSignIn(service, ua, visitedUrls)
+                                            },
+                                            onImportCookiesTxt = { service, uri ->
+                                                viewModel.importCookiesForService(service, uri)
+                                            },
+                                            onCheckSiteConnection = viewModel::checkSiteConnection,
+                                            onRemoveSiteConnection = viewModel::removeSiteConnection,
+                                            onUpdateSettings = viewModel::updateSettings,
+                                            onUpdateYtDlp = viewModel::updateYtDlp,
+                                            onClearCache = viewModel::clearCache
                                         )
                                     }
                                 }
-                            )
-                        },
-                        bottomBar = {
-                            NavigationBar(containerColor = AnvilGunmetal) {
-                                NavigationBarItem(
-                                    selected = selectedTab == MainTab.FORGE,
-                                    onClick = { viewModel.selectTab(MainTab.FORGE) },
-                                    icon = { Icon(Icons.Rounded.AutoAwesome, contentDescription = null) },
-                                    label = { Text("Forge") },
-                                    colors = NavigationBarItemDefaults.colors(
-                                        selectedIconColor = EmberFlame,
-                                        selectedTextColor = EmberFlame,
-                                        indicatorColor = FurnaceCard,
-                                        unselectedIconColor = MutedSteel,
-                                        unselectedTextColor = MutedSteel
-                                    )
-                                )
-                                NavigationBarItem(
-                                    selected = selectedTab == MainTab.QUEUE,
-                                    onClick = { viewModel.selectTab(MainTab.QUEUE) },
-                                    icon = {
-                                        BadgedBox(
-                                            badge = {
-                                                if (metrics.totalActiveJobs > 0) {
-                                                    Badge(
-                                                        containerColor = MasserCrimson,
-                                                        contentColor = ObsidianBg
-                                                    ) {
-                                                        Text(metrics.totalActiveJobs.toString())
-                                                    }
-                                                }
-                                            }
-                                        ) {
-                                            Icon(Icons.AutoMirrored.Rounded.List, contentDescription = null)
-                                        }
-                                    },
-                                    label = { Text("Queue") },
-                                    colors = NavigationBarItemDefaults.colors(
-                                        selectedIconColor = EmberFlame,
-                                        selectedTextColor = EmberFlame,
-                                        indicatorColor = FurnaceCard,
-                                        unselectedIconColor = MutedSteel,
-                                        unselectedTextColor = MutedSteel
-                                    )
-                                )
-                                NavigationBarItem(
-                                    selected = selectedTab == MainTab.SETTINGS,
-                                    onClick = { viewModel.selectTab(MainTab.SETTINGS) },
-                                    icon = { Icon(Icons.Rounded.Settings, contentDescription = null) },
-                                    label = { Text("Settings") },
-                                    colors = NavigationBarItemDefaults.colors(
-                                        selectedIconColor = EmberFlame,
-                                        selectedTextColor = EmberFlame,
-                                        indicatorColor = FurnaceCard,
-                                        unselectedIconColor = MutedSteel,
-                                        unselectedTextColor = MutedSteel
-                                    )
-                                )
                             }
                         }
-                    ) { innerPadding ->
-                        Column(modifier = Modifier.padding(innerPadding)) {
-                            AppUpdateBanner(
-                                updateState = appUpdateState,
-                                dismissedTag = settings.dismissedUpdateTag,
-                                onStartUpdate = { viewModel.startAppUpdate(autoInstallAfter = true) },
-                                onCancelDownload = viewModel::cancelAppUpdate,
-                                onInstallNow = { launchOrRequestInstall() },
-                                onDismiss = { tag -> viewModel.dismissUpdateBanner(tag) }
-                            )
 
-                            Box(modifier = Modifier.weight(1f)) {
-                                when (selectedTab) {
-                                    MainTab.FORGE -> HubScreen(
-                                        urlBatchText = urlBatchText,
-                                        resolvedLinks = resolvedLinks,
-                                        jobs = jobs,
-                                        metrics = metrics,
-                                        settings = settings,
-                                        deviceCapabilities = deviceCapabilities,
-                                        onUrlTextChange = viewModel::updateUrlBatchText,
-                                        onPasteClick = viewModel::pasteUrlsFromClipboard,
-                                        onToggleChipExpand = viewModel::toggleLinkChipExpanded,
-                                        onRetryResolveLink = viewModel::retryResolveLink,
-                                        onRemoveChip = viewModel::removeResolvedLink,
-                                        onUpdateChipSettings = viewModel::updateLinkChipSettings,
-                                        onTogglePlaylistTrack = viewModel::togglePlaylistTrack,
-                                        onSetAllPlaylistTracks = viewModel::setAllPlaylistTracks,
-                                        onSetSplitByChapters = viewModel::setSplitByChapters,
-                                        onToggleChapterTrack = viewModel::toggleChapterTrack,
-                                        onSetAllChapterTracks = viewModel::setAllChapterTracks,
-                                        onSetBulkChapterMode = viewModel::setBulkChapterMode,
-                                        onToggleChapterTrackModeOverride = viewModel::toggleChapterTrackModeOverride,
-                                        onSetChapterTrackAudioFormat = viewModel::setChapterTrackAudioFormat,
-                                        onApplyToSameType = viewModel::applySettingsToSameType,
-                                        onApplyToSameSite = viewModel::applySettingsToSameSite,
-                                        onApplyToAllLinks = viewModel::applySettingsToAllLinks,
-                                        onApplyQuickBatchPreset = viewModel::applyQuickBatchPreset,
-                                        onQueueBatch = viewModel::queueResolvedBatch,
-                                        onPickFilesClick = { multiFilePicker.launch(arrayOf("*/*")) },
-                                        onOpenQueueClick = { viewModel.selectTab(MainTab.QUEUE) },
-                                        onCancelAll = viewModel::cancelAllJobs,
-                                        onRemovePlaylistGroup = viewModel::removePlaylistGroup,
-                                        onPromptSignInForChip = viewModel::promptSignInForChip
+                        if (authPrompt != null && activeAuthWebViewSession == null) {
+                            val currentPrompt = authPrompt!!
+                            AuthRequiredPromptDialog(
+                                service = currentPrompt.service,
+                                targetUrl = currentPrompt.targetUrl,
+                                reason = currentPrompt.reason,
+                                isPaywallOrSubscription = currentPrompt.isPaywallOrSubscription,
+                                onDismiss = viewModel::dismissAuthPrompt,
+                                onSignInWebView = { resolvedService ->
+                                    activeAuthWebViewSession = Triple(
+                                        resolvedService,
+                                        currentPrompt.retryCleanUrl,
+                                        currentPrompt.retryJobId
                                     )
-                                    MainTab.QUEUE -> QueueScreen(
-                                        jobs = jobs,
-                                        metrics = metrics,
-                                        onCopyJob = viewModel::copyCompletedJobToClipboard,
-                                        onShareJob = viewModel::buildShareIntentForJob,
-                                        onCancelJob = viewModel::cancelJob,
-                                        onRetryJob = viewModel::retryJob,
-                                        onRemoveJob = viewModel::removeJob,
-                                        onCancelPlaylistGroup = viewModel::cancelPlaylistGroup,
-                                        onRemovePlaylistGroup = viewModel::removePlaylistGroup,
-                                        onRetryPlaylistGroup = viewModel::retryPlaylistGroup,
-                                        onCancelAll = viewModel::cancelAllJobs,
-                                        onClearFinished = viewModel::clearFinishedJobs
+                                },
+                                onImportCookiesTxt = { resolvedService ->
+                                    pendingAuthCookieImport = Triple(
+                                        resolvedService,
+                                        currentPrompt.retryCleanUrl,
+                                        currentPrompt.retryJobId
                                     )
-                                    MainTab.SETTINGS -> SettingsScreen(
-                                        settings = settings,
-                                        ytDlpVersion = ytDlpVersion,
-                                        isUpdatingYtDlp = isUpdatingYtDlp,
-                                        cacheSizeBytes = cacheSizeBytes,
-                                        appUpdateState = appUpdateState,
-                                        deviceCapabilities = deviceCapabilities,
-                                        siteConnections = siteConnections,
-                                        checkingServiceId = checkingServiceId,
-                                        onCheckAppUpdate = viewModel::checkForAppUpdates,
-                                        onStartAppUpdate = { viewModel.startAppUpdate(autoInstallAfter = true) },
-                                        onCancelAppUpdate = viewModel::cancelAppUpdate,
-                                        onInstallAppUpdate = { launchOrRequestInstall() },
-                                        onCaptureWebViewSession = { service, ua, visitedUrls ->
-                                            viewModel.completeWebViewSignIn(service, ua, visitedUrls)
-                                        },
-                                        onImportCookiesTxt = { service, uri ->
-                                            viewModel.importCookiesForService(service, uri)
-                                        },
-                                        onCheckSiteConnection = viewModel::checkSiteConnection,
-                                        onRemoveSiteConnection = viewModel::removeSiteConnection,
-                                        onUpdateSettings = viewModel::updateSettings,
-                                        onUpdateYtDlp = viewModel::updateYtDlp,
-                                        onClearCache = viewModel::clearCache
-                                    )
+                                    authCookiesPickerLauncher.launch(arrayOf("text/plain", "text/*", "*/*"))
+                                },
+                                onOpenExternalApp = { targetUrl ->
+                                    runCatching {
+                                        startActivity(Intent(Intent.ACTION_VIEW, Uri.parse(targetUrl)))
+                                    }.onFailure {
+                                        Toast.makeText(this@MainActivity, "No app installed to open link", Toast.LENGTH_SHORT).show()
+                                    }
                                 }
-                            }
+                            )
+                        }
+
+                        activeAuthWebViewSession?.let { (service, retryUrl, retryJobId) ->
+                            AuthWebViewDialog(
+                                service = service,
+                                onDismiss = { activeAuthWebViewSession = null },
+                                onCaptureSession = { resolvedService, ua, visitedUrls ->
+                                    activeAuthWebViewSession = null
+                                    viewModel.completeWebViewSignIn(resolvedService, ua, visitedUrls, retryUrl, retryJobId)
+                                },
+                                onImportCookiesClick = { resolvedService ->
+                                    pendingAuthCookieImport = Triple(resolvedService, retryUrl, retryJobId)
+                                    authCookiesPickerLauncher.launch(arrayOf("text/plain", "text/*", "*/*"))
+                                }
+                            )
                         }
                     }
 
-                    if (authPrompt != null && activeAuthWebViewSession == null) {
-                        val currentPrompt = authPrompt!!
-                        AuthRequiredPromptDialog(
-                            service = currentPrompt.service,
-                            targetUrl = currentPrompt.targetUrl,
-                            reason = currentPrompt.reason,
-                            isPaywallOrSubscription = currentPrompt.isPaywallOrSubscription,
-                            onDismiss = viewModel::dismissAuthPrompt,
-                            onSignInWebView = { resolvedService ->
-                                activeAuthWebViewSession = Triple(
-                                    resolvedService,
-                                    currentPrompt.retryCleanUrl,
-                                    currentPrompt.retryJobId
-                                )
-                            },
-                            onImportCookiesTxt = { resolvedService ->
-                                pendingAuthCookieImport = Triple(
-                                    resolvedService,
-                                    currentPrompt.retryCleanUrl,
-                                    currentPrompt.retryJobId
-                                )
-                                authCookiesPickerLauncher.launch(arrayOf("text/plain", "text/*", "*/*"))
-                            },
-                            onOpenExternalApp = { targetUrl ->
-                                runCatching {
-                                    startActivity(Intent(Intent.ACTION_VIEW, Uri.parse(targetUrl)))
-                                }.onFailure {
-                                    Toast.makeText(this@MainActivity, "No app installed to open link", Toast.LENGTH_SHORT).show()
-                                }
-                            }
+                    if (currentSampleLab != null || currentStudio != null) {
+                        SnackbarHost(
+                            hostState = snackbarHostState,
+                            modifier = Modifier
+                                .align(Alignment.BottomCenter)
+                                .navigationBarsPadding()
+                                .padding(horizontal = 12.dp, vertical = 12.dp)
                         )
                     }
 
-                    activeAuthWebViewSession?.let { (service, retryUrl, retryJobId) ->
-                        AuthWebViewDialog(
-                            service = service,
-                            onDismiss = { activeAuthWebViewSession = null },
-                            onCaptureSession = { resolvedService, ua, visitedUrls ->
-                                activeAuthWebViewSession = null
-                                viewModel.completeWebViewSignIn(resolvedService, ua, visitedUrls, retryUrl, retryJobId)
-                            },
-                            onImportCookiesClick = { resolvedService ->
-                                pendingAuthCookieImport = Triple(resolvedService, retryUrl, retryJobId)
-                                authCookiesPickerLauncher.launch(arrayOf("text/plain", "text/*", "*/*"))
+                    pendingPresetSave?.let { (mediaKind, suggestedName, specToSave) ->
+                        EmojiPresetPickerDialog(
+                            mediaKind = mediaKind,
+                            spec = specToSave,
+                            initialName = suggestedName,
+                            onDismiss = { pendingPresetSave = null },
+                            onConfirm = { emoji, name, isDefaultForKind ->
+                                viewModel.saveFormatPreset(
+                                    mediaKind = mediaKind,
+                                    spec = specToSave,
+                                    emoji = emoji,
+                                    name = name,
+                                    isDefaultForKind = isDefaultForKind
+                                )
+                                pendingPresetSave = null
                             }
                         )
                     }
@@ -486,6 +606,7 @@ class MainActivity : ComponentActivity() {
                 if (streamUri != null) {
                     viewModel.openStudioForUris(listOf(streamUri), fromShareIntent = true)
                 } else if (!sharedText.isNullOrBlank()) {
+                    viewModel.dismissSampleLabForNavigation()
                     viewModel.closeStudioSession()
                     viewModel.updateUrlBatchText(sharedText)
                     viewModel.selectTab(MainTab.FORGE)

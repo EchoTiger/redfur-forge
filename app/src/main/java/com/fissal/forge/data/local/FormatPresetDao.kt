@@ -28,6 +28,14 @@ interface FormatPresetDao {
     @Insert(onConflict = OnConflictStrategy.REPLACE)
     suspend fun upsert(preset: FormatPresetEntity)
 
+    @Transaction
+    suspend fun savePresetWithDefault(preset: FormatPresetEntity) {
+        if (preset.isDefaultForKind) {
+            clearDefaultForKind(preset.mediaKind)
+        }
+        upsert(preset)
+    }
+
     @Query("UPDATE format_presets SET isDefaultForKind = 0 WHERE mediaKind = :mediaKind")
     suspend fun clearDefaultForKind(mediaKind: String)
 

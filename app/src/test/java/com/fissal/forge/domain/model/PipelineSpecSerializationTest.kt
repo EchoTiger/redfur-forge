@@ -312,4 +312,58 @@ class PipelineSpecSerializationTest {
         assertEquals("patreon", chipDecoded.authServiceId)
         assertTrue(chipDecoded.authIsPaywall)
     }
+
+    @Test
+    fun sanitizeForPresetAndNormalizedJsonStripSourceSpecificFieldsOnly() {
+        val rawSpec = PipelineSpec(
+            download = DownloadSpec(url = "https://example.com/private?token=secret"),
+            convert = ConvertSpec(
+                targetExtension = "mp4",
+                videoCodec = VideoCodecChoice.HEVC,
+                audioCodec = AudioCodecChoice.AAC
+            ),
+            compress = CompressSpec(
+                mode = CompressMode.QUALITY,
+                videoCrf = 25,
+                maxDimensionPx = 1080
+            ),
+            trim = TrimSpec(
+                startMs = 12_000L,
+                endMs = 44_000L,
+                fadeInOut = true,
+                muteAudio = true,
+                silenceSkip = SilenceSkipSpec(enabled = true, thresholdDb = -35, minSilenceMs = 500)
+            ),
+            crop = CropSpec(
+                preset = AspectPreset.RATIO_16_9,
+                rect = CropRectNormalized(0.1f, 0.1f, 0.9f, 0.9f)
+            ),
+            delivery = DeliverySpec(
+                saveToDevice = true,
+                stripMetadata = true,
+                customOutputBaseName = "MySecretVideo"
+            )
+        )
+
+        val sanitized = rawSpec.sanitizeForPreset()
+        assertNull(sanitized.download)
+        assertNull(sanitized.crop)
+        assertEquals(0L, sanitized.trim?.startMs)
+        assertNull(sanitized.trim?.endMs)
+        assertTrue(sanitized.trim?.fadeInOut == true)
+        assertTrue(sanitized.trim?.muteAudio == true)
+        assertTrue(sanitized.trim?.silenceSkip?.enabled == true)
+        assertTrue(sanitized.delivery.stripMetadata)
+        assertNull(sanitized.delivery.customOutputBaseName)
+
+        val normalizedJson = rawSpec.toNormalizedJson()
+        val roundTripped = json.decodeFromString<PipelineSpec>(normalizedJson)
+        assertEquals(sanitized, roundTripped)
+
+        // Plain range-only trim (no audio/fade/silence flags) is completely stripped from preset
+        val rangeOnlySpec = PipelineSpec(
+            trim = TrimSpec(startMs = 5_000L, endMs = 15_000L)
+        )
+        assertNull(rangeOnlySpec.sanitizeForPreset().trim)
+    }
 }

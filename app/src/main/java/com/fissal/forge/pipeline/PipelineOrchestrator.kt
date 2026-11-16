@@ -989,7 +989,8 @@ class PipelineOrchestrator(
             exportsDir,
             jobsWorkRoot,
             File(appContext.cacheDir, "probe_staging"),
-            File(appContext.cacheDir, "sample_preview")
+            File(appContext.cacheDir, "sample_preview"),
+            File(appContext.cacheDir, "sample_lab")
         ).forEach { dir ->
             cleared += directorySizeBytes(dir)
             dir.deleteRecursively()
@@ -1013,6 +1014,7 @@ class PipelineOrchestrator(
             directorySizeBytes(jobsWorkRoot) +
             directorySizeBytes(File(appContext.cacheDir, "probe_staging")) +
             directorySizeBytes(File(appContext.cacheDir, "sample_preview")) +
+            directorySizeBytes(File(appContext.cacheDir, "sample_lab")) +
             directorySizeBytes(File(appContext.cacheDir, "updates")) +
             clipboardExportManager.clipboardCacheSizeBytes()
     }

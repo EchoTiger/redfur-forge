@@ -12,6 +12,7 @@ import com.fissal.forge.engine.FFmpegCliEngine
 import com.fissal.forge.engine.ImageRawEngine
 import com.fissal.forge.engine.MediaProbeEngine
 import com.fissal.forge.engine.NativeBinaryManager
+import com.fissal.forge.engine.SampleFrameEngine
 import com.fissal.forge.engine.YtDlpEngine
 import com.fissal.forge.pipeline.PipelineOrchestrator
 import com.fissal.forge.update.AppUpdateManager
@@ -40,6 +41,8 @@ class ForgeApplication : Application() {
         private set
     lateinit var ytDlpEngine: YtDlpEngine
         private set
+    lateinit var sampleFrameEngine: SampleFrameEngine
+        private set
     lateinit var mediaStoreExporter: MediaStoreExporter
         private set
     lateinit var clipboardExportManager: ClipboardExportManager
@@ -61,6 +64,7 @@ class ForgeApplication : Application() {
         imageRawEngine = ImageRawEngine(this)
         ffmpegEngine = FFmpegCliEngine(this, binaryManager)
         ytDlpEngine = YtDlpEngine(binaryManager, siteAuthVault)
+        sampleFrameEngine = SampleFrameEngine(this, ffmpegEngine, imageRawEngine, probeEngine)
         mediaStoreExporter = MediaStoreExporter(this)
         clipboardExportManager = ClipboardExportManager(this)
         appUpdateManager = AppUpdateManager(this)
@@ -80,7 +84,7 @@ class ForgeApplication : Application() {
             siteAuthVault = siteAuthVault
         )
 
-        // Sweep any leftover ephemeral cookie files on cold start before launching yt-dlp jobs
+        // Sweep any leftover ephemeral cookie files on cold start (Sample Lab cache is swept under ViewModel mutex)
         appScope.launch {
             runCatching { siteAuthVault.sweepStaleTempCookieFiles() }
         }
