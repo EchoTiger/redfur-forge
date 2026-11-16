@@ -2,6 +2,7 @@ package com.fissal.forge.domain.logic
 
 import com.fissal.forge.domain.model.DetectedLinkKind
 import org.junit.Assert.assertEquals
+import org.junit.Assert.assertFalse
 import org.junit.Assert.assertNotNull
 import org.junit.Assert.assertTrue
 import org.junit.Test
@@ -243,5 +244,20 @@ class YtDlpJsonParserTest {
         assertEquals("100 Ways", chapters[3].title)
         assertEquals(600_000L, chapters[3].startMs)
         assertEquals(780_000L, chapters[3].endMs)
+    }
+
+    @Test
+    fun redactsUrlCredentialsAndTokensFromFallbackTitles() {
+        val secretUrl = "https://user:s3cr3tPass@cdn.example.com/v?token=tok123&sig=abc"
+        val fallbackEmpty = YtDlpJsonParser.parse(secretUrl, "")
+        assertFalse(fallbackEmpty.title.contains("s3cr3tPass"))
+        assertFalse(fallbackEmpty.title.contains("tok123"))
+        assertFalse(fallbackEmpty.title.contains("abc"))
+
+        val titlelessJson = """{"id":"vid1","duration":12}"""
+        val fallbackUntitled = YtDlpJsonParser.parse(secretUrl, titlelessJson)
+        assertFalse(fallbackUntitled.title.contains("s3cr3tPass"))
+        assertFalse(fallbackUntitled.title.contains("tok123"))
+        assertTrue(fallbackUntitled.title.contains("[REDACTED]"))
     }
 }

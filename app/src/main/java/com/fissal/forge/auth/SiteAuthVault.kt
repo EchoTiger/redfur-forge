@@ -7,6 +7,8 @@ import android.security.keystore.KeyProperties
 import android.webkit.CookieManager
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.NonCancellable
+import kotlinx.coroutines.currentCoroutineContext
+import kotlinx.coroutines.ensureActive
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
@@ -103,11 +105,23 @@ class SiteAuthVault(context: Context) {
         if (initialSweepDone) return
         sweepMutex.withLock {
             if (!initialSweepDone) {
-                withContext(Dispatchers.IO) {
+                withContext(Dispatchers.IO + NonCancellable) {
                     ensurePrivateDirectories()
-                    tmpDir.listFiles()?.forEach { file ->
-                        if (file.isFile) {
-                            wipeAndDelete(file)
+                    if (tmpDir.exists()) {
+                        tmpDir.walkBottomUp().forEach { entry ->
+                            if (entry.isFile) {
+                                wipeAndDelete(entry)
+                            } else if (entry != tmpDir) {
+                                runCatching { entry.delete() }
+                            }
+                        }
+                    }
+                    vaultMutex.withLock {
+                        vaultDir.listFiles()?.forEach { file ->
+                            when {
+                                file.isFile && file.name.endsWith(".tmp") -> wipeAndDelete(file)
+                                file.isFile && file.name.endsWith(".enc") -> enforceOwnerOnlyPermissions(file)
+                            }
                         }
                     }
                 }
@@ -497,27 +511,29 @@ class SiteAuthVault(context: Context) {
             return block(null, null)
         }
 
-        val tempCookieFile = withContext(Dispatchers.IO) {
-            ensurePrivateDirectories()
-            val file = createOwnerOnlyFile(tmpDir, prefix = "cookies_", suffix = ".txt")
-            val serialized = CookieNetscapeSerializer.serialize(activeCookies)
-            val bytes = serialized.toByteArray(Charsets.UTF_8)
-            try {
-                file.writeBytes(bytes)
-            } catch (t: Throwable) {
-                wipeAndDelete(file)
-                throw t
-            } finally {
-                bytes.fill(0)
-            }
-            file
-        }
-
+        var tempCookieFile: File? = null
         return try {
+            tempCookieFile = withContext(Dispatchers.IO + NonCancellable) {
+                ensurePrivateDirectories()
+                val file = createOwnerOnlyFile(tmpDir, prefix = "cookies_", suffix = ".txt")
+                val serialized = CookieNetscapeSerializer.serialize(activeCookies)
+                val bytes = serialized.toByteArray(Charsets.UTF_8)
+                try {
+                    file.writeBytes(bytes)
+                    enforceOwnerOnlyPermissions(file)
+                } catch (t: Throwable) {
+                    wipeAndDelete(file)
+                    throw t
+                } finally {
+                    bytes.fill(0)
+                }
+                file
+            }
+            currentCoroutineContext().ensureActive()
             block(tempCookieFile, payload.userAgent.ifBlank { null })
         } finally {
             withContext(Dispatchers.IO + NonCancellable) {
-                wipeAndDelete(tempCookieFile)
+                tempCookieFile?.let { wipeAndDelete(it) }
             }
         }
     }

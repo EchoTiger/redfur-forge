@@ -1,6 +1,7 @@
 package com.fissal.forge.engine
 
 import com.fissal.forge.auth.AuthErrorClassifier
+import com.fissal.forge.auth.CredentialRedactor
 import com.fissal.forge.auth.SiteAuthVault
 import com.fissal.forge.domain.logic.YtDlpJsonParser
 import com.fissal.forge.domain.model.DownloadMode
@@ -62,7 +63,11 @@ class YtDlpEngine(
                     rawStderr = combinedErr,
                     customDomains = authVault?.connectedCustomDomains().orEmpty()
                 )?.let { throw it }
-                throw t
+                val safeMsg = CredentialRedactor.sanitizeDiagnostic(
+                    t.message ?: t::class.java.simpleName,
+                    maxChars = 280
+                ).ifBlank { "Metadata lookup failed" }
+                throw IOException(safeMsg, t)
             } finally {
                 cancelHandle.dispose()
             }
@@ -74,7 +79,11 @@ class YtDlpEngine(
                     rawStderr = response.err,
                     customDomains = authVault?.connectedCustomDomains().orEmpty()
                 )?.let { throw it }
-                throw IOException(response.err?.lineSequence()?.firstOrNull { it.isNotBlank() } ?: "Empty metadata response")
+                val safeErr = response.err?.lineSequence()?.firstOrNull { it.isNotBlank() }
+                    ?.let { CredentialRedactor.sanitizeDiagnostic(it, maxChars = 240) }
+                    ?.takeIf { it.isNotBlank() }
+                    ?: "Empty metadata response"
+                throw IOException(safeErr)
             }
             YtDlpJsonParser.parse(url, outText)
         }
@@ -190,7 +199,11 @@ class YtDlpEngine(
                     rawStderr = combinedErr,
                     customDomains = authVault?.connectedCustomDomains().orEmpty()
                 )?.let { throw it }
-                throw t
+                val safeMsg = CredentialRedactor.sanitizeDiagnostic(
+                    combinedErr.ifBlank { t.message ?: t::class.java.simpleName },
+                    maxChars = 320
+                ).ifBlank { "Download failed" }
+                throw IOException(safeMsg, t)
             } finally {
                 cancelHandle.dispose()
             }

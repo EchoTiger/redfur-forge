@@ -1,5 +1,6 @@
 package com.fissal.forge.domain.model
 
+import com.fissal.forge.auth.CredentialRedactor
 import java.util.Locale
 import kotlinx.serialization.Serializable
 
@@ -147,7 +148,10 @@ data class ResolvedLinkChipItem(
     val host: String,
     val isPlaylistLikeUrl: Boolean = false,
     val resolveState: LinkResolveState = LinkResolveState.RESOLVING,
-    val title: String = cleanUrl.removePrefix("https://").removePrefix("http://").take(60),
+    val title: String = CredentialRedactor.redactUrlForDisplay(cleanUrl)
+        .removePrefix("https://")
+        .removePrefix("http://")
+        .take(60),
     val uploader: String? = null,
     val thumbnailUrl: String? = null,
     val detectedKind: DetectedLinkKind = DetectedLinkKind.VIDEO,

@@ -5,6 +5,10 @@ import android.graphics.Bitmap
 import android.graphics.BitmapFactory
 import android.net.Uri
 import android.os.Build
+import android.os.StatFs
+import com.fissal.forge.auth.CredentialRedactor
+import com.fissal.forge.domain.logic.DeviceCapabilityAdvisor
+import com.fissal.forge.domain.logic.DeviceCapabilityReport
 import com.fissal.forge.domain.logic.FilesizeEstimator
 import com.fissal.forge.domain.logic.LumaFrame
 import com.fissal.forge.domain.logic.PerceptualAdvisor
@@ -50,11 +54,22 @@ class SampleFrameEngine(
     private val appContext: Context,
     private val ffmpegEngine: FFmpegCliEngine,
     private val imageRawEngine: ImageRawEngine,
-    private val probeEngine: MediaProbeEngine
+    private val probeEngine: MediaProbeEngine,
+    private val deviceCapabilities: DeviceCapabilityReport = DeviceCapabilityAdvisor.profileDevice(appContext)
 ) {
 
     private val cacheRoot: File
         get() = File(appContext.cacheDir, "sample_lab")
+
+    private val maxSafeTextureDim: Int
+        get() = minOf(deviceCapabilities.maxSafeRasterDimensionPx, DeviceCapabilityAdvisor.GL_SAFE_MAX_TEXTURE_PX)
+
+    private val maxIntermediatePixels: Long
+        get() = if (deviceCapabilities.snapshot.isLowRamDevice) {
+            DeviceCapabilityAdvisor.LOW_RAM_MAX_INTERMEDIATE_PIXELS
+        } else {
+            DeviceCapabilityAdvisor.DEFAULT_MAX_INTERMEDIATE_PIXELS
+        }
 
     suspend fun prepareBaseline(
         sessionId: String,
@@ -70,13 +85,32 @@ class SampleFrameEngine(
         coroutineContext.ensureActive()
         val sessionDir = File(cacheRoot, sanitizeSessionId(sessionId)).apply { mkdirs() }
         val origFile = File(sessionDir, "orig.png")
+        val effectiveMaxDim = DeviceCapabilityAdvisor.computeSamplePreviewMaxDimPx(deviceCapabilities, maxPreviewDim)
+        val sampleThreads = DeviceCapabilityAdvisor.computeSampleFfmpegThreads(deviceCapabilities)
+        val effectiveAnalysisDim = minOf(effectiveMaxDim, MAX_ANALYSIS_DIM)
+
+        val needsVideoStage = probe.mediaKind == MediaKind.VIDEO &&
+            (existingStagedVideoFile == null || !existingStagedVideoFile.exists()) &&
+            sourceUri.scheme != "file" &&
+            sessionDir.listFiles { f -> f.isFile && f.name.startsWith("source") && f.length() > 0L }.isNullOrEmpty()
+        val availableBytes = runCatching { StatFs(sessionDir.absolutePath).availableBytes }.getOrDefault(-1L)
+        if (availableBytes >= 0L) {
+            val preflight = DeviceCapabilityAdvisor.evaluateStoragePreflight(
+                availableBytes = availableBytes,
+                estimatedInputBytes = if (needsVideoStage) probe.fileSizeBytes else 0L,
+                isSampleLab = true
+            )
+            if (!preflight.sufficient) {
+                throw IOException(preflight.userFacingMessage ?: "Insufficient scratch storage for Sample Lab")
+            }
+        }
 
         if (probe.mediaKind == MediaKind.IMAGE || probe.mediaKind == MediaKind.CAMERA_RAW) {
             val sourceBmp = imageRawEngine.decodeReferenceSourceBitmap(
                 uri = sourceUri,
                 probe = probe,
                 crop = crop,
-                maxDimension = maxPreviewDim
+                maxDimension = effectiveMaxDim
             )
             try {
                 coroutineContext.ensureActive()
@@ -86,7 +120,7 @@ class SampleFrameEngine(
                     }
                     fos.flush()
                 }
-                val luma = extractLumaFrame(sourceBmp, maxAnalysisDim = MAX_ANALYSIS_DIM)
+                val luma = extractLumaFrame(sourceBmp, maxAnalysisDim = effectiveAnalysisDim)
                 val sampleBytes = origFile.length().coerceAtLeast(1L)
                 val baselineResult = RenderedSampleResult(
                     candidateId = ORIG_CANDIDATE_ID,
@@ -136,9 +170,10 @@ class SampleFrameEngine(
                 timestampMs = resolvedTs,
                 workDir = sessionDir,
                 outputPngFile = origFile,
-                maxPreviewDim = maxPreviewDim
+                maxPreviewDim = effectiveMaxDim,
+                sampleThreads = sampleThreads
             )
-            luma = extractLumaFromFileSafely(origFile, maxAnalysisDim = MAX_ANALYSIS_DIM)
+            luma = extractLumaFromFileSafely(origFile, maxAnalysisDim = effectiveAnalysisDim)
 
             if (autoDodgeBlackFade && PerceptualAdvisor.isNearBlackFrame(luma) && (activeEnd - activeStart) > 1500L) {
                 val span = activeEnd - activeStart
@@ -157,9 +192,10 @@ class SampleFrameEngine(
                         timestampMs = altTs,
                         workDir = sessionDir,
                         outputPngFile = origFile,
-                        maxPreviewDim = maxPreviewDim
+                        maxPreviewDim = effectiveMaxDim,
+                        sampleThreads = sampleThreads
                     )
-                    val altLuma = extractLumaFromFileSafely(origFile, maxAnalysisDim = MAX_ANALYSIS_DIM)
+                    val altLuma = extractLumaFromFileSafely(origFile, maxAnalysisDim = effectiveAnalysisDim)
                     extraction = altExtraction
                     luma = altLuma
                     resolvedTs = altTs
@@ -208,6 +244,9 @@ class SampleFrameEngine(
         }
 
         val sessionDir = File(cacheRoot, sanitizeSessionId(sessionId)).apply { mkdirs() }
+        val effectiveMaxDim = DeviceCapabilityAdvisor.computeSamplePreviewMaxDimPx(deviceCapabilities, maxPreviewDim)
+        val sampleThreads = DeviceCapabilityAdvisor.computeSampleFfmpegThreads(deviceCapabilities)
+        val effectiveAnalysisDim = minOf(effectiveMaxDim, MAX_ANALYSIS_DIM)
         val safeCand = sanitizeId(candidate.id, "cand_${candidate.indexNumber}")
         val isVisualPhoto = probe.mediaKind == MediaKind.IMAGE || probe.mediaKind == MediaKind.CAMERA_RAW
         val previewExt = if (isVisualPhoto) {
@@ -221,6 +260,17 @@ class SampleFrameEngine(
         val previewFile = File(sessionDir, "${safeCand}_preview.$previewExt")
 
         try {
+            val availableBytes = runCatching { StatFs(sessionDir.absolutePath).availableBytes }.getOrDefault(-1L)
+            if (availableBytes >= 0L) {
+                val preflight = DeviceCapabilityAdvisor.evaluateStoragePreflight(
+                    availableBytes = availableBytes,
+                    isSampleLab = true
+                )
+                if (!preflight.sufficient) {
+                    throw IOException(preflight.userFacingMessage ?: "Insufficient scratch storage")
+                }
+            }
+
             val outWidth: Int
             val outHeight: Int
             val sampleBytes: Long
@@ -234,7 +284,7 @@ class SampleFrameEngine(
                     probe = probe,
                     spec = candidate.pipelineSpec,
                     outputFile = previewFile,
-                    sampleWorkMaxDim = minOf(maxPreviewDim.coerceAtLeast(16), MAX_ANALYSIS_DIM)
+                    sampleWorkMaxDim = effectiveAnalysisDim.coerceAtLeast(16)
                 )
                 val (w, h) = readImageBounds(previewFile)
                 outWidth = w
@@ -251,7 +301,8 @@ class SampleFrameEngine(
                     workDir = sessionDir,
                     outputPngFile = previewFile,
                     referenceClipBytes = baseline.referenceClipBytes,
-                    maxPreviewDim = maxPreviewDim
+                    maxPreviewDim = effectiveMaxDim,
+                    sampleThreads = sampleThreads
                 )
                 outWidth = videoResult.width
                 outHeight = videoResult.height
@@ -261,7 +312,7 @@ class SampleFrameEngine(
 
             coroutineContext.ensureActive()
 
-            val candLuma = extractLumaFromFileSafely(previewFile, maxAnalysisDim = MAX_ANALYSIS_DIM)
+            val candLuma = extractLumaFromFileSafely(previewFile, maxAnalysisDim = effectiveAnalysisDim)
             val perceptualScore = PerceptualAdvisor.computePerceptualScore(baseline.referenceLuma, candLuma)
             val projectedTotalBytes = FilesizeEstimator.estimateLocalPipeline(
                 probe = probe,
@@ -295,7 +346,10 @@ class SampleFrameEngine(
                 candidateId = candidate.id,
                 previewFilePath = null,
                 status = SampleRenderStatus.FAILED,
-                error = err.message ?: "Sample render failed"
+                error = CredentialRedactor.sanitizeDiagnostic(
+                    err.message ?: "Sample render failed",
+                    maxChars = 160
+                ).ifBlank { "Sample render failed" }
             )
         }
     }
@@ -372,8 +426,12 @@ class SampleFrameEngine(
     }
 
     private fun extractLumaFromFileSafely(file: File, maxAnalysisDim: Int = MAX_ANALYSIS_DIM): LumaFrame {
-        val bmp = decodeSampleFileSafely(file, maxDimensionPx = maxAnalysisDim)
-            ?: throw IOException("Failed to decode sample frame for perceptual analysis (${file.name})")
+        val bmp = decodeSampleFileSafely(
+            file = file,
+            maxDimensionPx = maxAnalysisDim,
+            maxSafeTexturePx = maxSafeTextureDim,
+            maxIntermediatePixels = maxIntermediatePixels
+        ) ?: throw IOException("Failed to decode sample frame for perceptual analysis (${file.name})")
         return try {
             extractLumaFrame(bmp, maxAnalysisDim = maxAnalysisDim)
         } finally {
@@ -470,20 +528,48 @@ class SampleFrameEngine(
         }
 
         /**
-         * Safely decodes an image file bounded to [maxDimensionPx] using power-of-2 subsampling
-         * plus exact downscale, recycling any oversized intermediate bitmap.
+         * Safely decodes an image file bounded to [maxDimensionPx], [maxSafeTexturePx] (`GL_MAX_TEXTURE_SIZE`),
+         * and [maxIntermediatePixels] using power-of-2 subsampling plus exact downscale, recovering
+         * cleanly from transient OOM pressure by doubling `inSampleSize`.
          */
-        fun decodeSampleFileSafely(file: File, maxDimensionPx: Int): Bitmap? {
+        fun decodeSampleFileSafely(
+            file: File,
+            maxDimensionPx: Int,
+            maxSafeTexturePx: Int = DeviceCapabilityAdvisor.GL_SAFE_MAX_TEXTURE_PX,
+            maxIntermediatePixels: Long = DeviceCapabilityAdvisor.DEFAULT_MAX_INTERMEDIATE_PIXELS
+        ): Bitmap? {
             if (!file.exists() || file.length() <= 0L || maxDimensionPx <= 0) return null
             val bounds = BitmapFactory.Options().apply { inJustDecodeBounds = true }
             BitmapFactory.decodeFile(file.absolutePath, bounds)
             if (bounds.outWidth <= 0 || bounds.outHeight <= 0) return null
 
-            var inSampleSize = 1
-            while (max(bounds.outWidth / inSampleSize, bounds.outHeight / inSampleSize) > maxDimensionPx * 2) {
-                inSampleSize *= 2
-            }
+            val clampedTextureCap = maxSafeTexturePx.coerceIn(64, DeviceCapabilityAdvisor.GL_SAFE_MAX_TEXTURE_PX)
+            val safeMaxDim = maxDimensionPx.coerceIn(1, clampedTextureCap)
+            val initialSampleSize = DeviceCapabilityAdvisor.calculateSafeInSampleSize(
+                rawWidth = bounds.outWidth,
+                rawHeight = bounds.outHeight,
+                targetMaxDimPx = safeMaxDim,
+                maxSafeTexturePx = clampedTextureCap,
+                maxIntermediatePixels = maxIntermediatePixels
+            )
 
+            return try {
+                decodeAndScaleSample(file, initialSampleSize, safeMaxDim)
+            } catch (_: OutOfMemoryError) {
+                System.gc()
+                try {
+                    decodeAndScaleSample(
+                        file = file,
+                        inSampleSize = (initialSampleSize * 2).coerceAtLeast(2),
+                        maxDimPx = (safeMaxDim / 2).coerceAtLeast(16)
+                    )
+                } catch (_: OutOfMemoryError) {
+                    null
+                }
+            }
+        }
+
+        private fun decodeAndScaleSample(file: File, inSampleSize: Int, maxDimPx: Int): Bitmap? {
             val decoded = BitmapFactory.decodeFile(
                 file.absolutePath,
                 BitmapFactory.Options().apply {
@@ -493,18 +579,29 @@ class SampleFrameEngine(
             ) ?: return null
 
             val curMax = max(decoded.width, decoded.height)
-            if (curMax <= maxDimensionPx) {
+            if (curMax <= maxDimPx) {
                 return decoded
             }
 
-            val scale = maxDimensionPx.toFloat() / curMax.toFloat()
-            val targetW = (decoded.width * scale).roundToInt().coerceAtLeast(1)
-            val targetH = (decoded.height * scale).roundToInt().coerceAtLeast(1)
-            val scaled = Bitmap.createScaledBitmap(decoded, targetW, targetH, true)
-            if (scaled !== decoded) {
-                decoded.recycle()
+            var scaled: Bitmap? = null
+            return try {
+                val scale = maxDimPx.toFloat() / curMax.toFloat()
+                val targetW = (decoded.width * scale).roundToInt().coerceAtLeast(1)
+                val targetH = (decoded.height * scale).roundToInt().coerceAtLeast(1)
+                scaled = Bitmap.createScaledBitmap(decoded, targetW, targetH, true)
+                if (scaled !== decoded) {
+                    decoded.recycle()
+                }
+                scaled
+            } catch (err: Throwable) {
+                if (scaled != null && scaled !== decoded && !scaled!!.isRecycled) {
+                    scaled!!.recycle()
+                }
+                if (!decoded.isRecycled) {
+                    decoded.recycle()
+                }
+                throw err
             }
-            return scaled
         }
 
         /**

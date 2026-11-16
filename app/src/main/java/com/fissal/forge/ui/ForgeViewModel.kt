@@ -14,6 +14,7 @@ import androidx.lifecycle.viewModelScope
 import com.fissal.forge.ForgeApplication
 import com.fissal.forge.auth.AuthRequiredException
 import com.fissal.forge.auth.ConnectedServiceSummary
+import com.fissal.forge.auth.CredentialRedactor
 import com.fissal.forge.auth.ServiceCatalog
 import com.fissal.forge.auth.ServiceDescriptor
 import com.fissal.forge.data.local.ForgeJobEntity
@@ -273,6 +274,7 @@ class ForgeViewModel(application: Application) : AndroidViewModel(application) {
 
     val appUpdateState: StateFlow<AppUpdateState> = appUpdateManager.state
 
+    private var studioPreviewJob: Job? = null
     private var samplePreviewJob: Job? = null
     private val sampleVideoMutex = Mutex()
     private val samplePreviewDir: File
@@ -323,6 +325,8 @@ class ForgeViewModel(application: Application) : AndroidViewModel(application) {
 
     override fun onCleared() {
         super.onCleared()
+        studioPreviewJob?.cancel()
+        studioPreviewJob = null
         samplePreviewJob?.cancel()
         samplePreviewJob = null
         cachedSampleVideoUri = null
@@ -469,7 +473,7 @@ class ForgeViewModel(application: Application) : AndroidViewModel(application) {
                 val meta = resolveSemaphore.withPermit {
                     ytDlpEngine.resolveMetadata(
                         url = item.cleanUrl,
-                        cancelKey = item.cleanUrl.hashCode().toString(),
+                        cancelKey = UUID.randomUUID().toString(),
                         siteConnectionId = siteConnId
                     )
                 }
@@ -510,12 +514,16 @@ class ForgeViewModel(application: Application) : AndroidViewModel(application) {
                     retryJobId = null
                 )
             } catch (err: Throwable) {
+                val safeErr = CredentialRedactor.sanitizeDiagnostic(
+                    err.message?.lineSequence()?.firstOrNull(),
+                    maxChars = 140
+                ).ifBlank { "Preview unavailable (download still works)" }
                 _resolvedLinks.update { list ->
                     list.map { chip ->
                         if (chip.cleanUrl == item.cleanUrl) {
                             chip.copy(
                                 resolveState = LinkResolveState.FAILED,
-                                errorHint = err.message?.lineSequence()?.firstOrNull()?.take(80) ?: "Preview unavailable (download still works)"
+                                errorHint = safeErr
                             )
                         } else {
                             chip
@@ -877,7 +885,7 @@ class ForgeViewModel(application: Application) : AndroidViewModel(application) {
                 applyConnectedSessionAndRetry(summary, pendingRetryUrl, pendingRetryJobId)
                 showBanner("Connected ${summary.service.displayName} securely (${summary.cookieCount} cookies)")
             }.onFailure { err ->
-                showBanner(err.message ?: "Could not capture sign-in session")
+                showBanner(CredentialRedactor.sanitizeDiagnostic(err.message, 140).ifBlank { "Could not capture sign-in session" })
             }
         }
     }
@@ -899,7 +907,7 @@ class ForgeViewModel(application: Application) : AndroidViewModel(application) {
                 applyConnectedSessionAndRetry(summary, pendingRetryUrl, pendingRetryJobId)
                 showBanner("Imported ${summary.cookieCount} encrypted cookies for ${summary.service.displayName}")
             }.onFailure { err ->
-                showBanner(err.message ?: "Failed to import cookies.txt")
+                showBanner(CredentialRedactor.sanitizeDiagnostic(err.message, 140).ifBlank { "Failed to import cookies.txt" })
             }
         }
     }
@@ -914,7 +922,7 @@ class ForgeViewModel(application: Application) : AndroidViewModel(application) {
                     showBanner("${summary.service.displayName}: ${summary.statusMessage}")
                 }
             } catch (err: Throwable) {
-                showBanner(err.message ?: "Connection check failed")
+                showBanner(CredentialRedactor.sanitizeDiagnostic(err.message, 140).ifBlank { "Connection check failed" })
             } finally {
                 _checkingServiceId.value = null
             }
@@ -937,7 +945,7 @@ class ForgeViewModel(application: Application) : AndroidViewModel(application) {
                 }
                 showBanner("Disconnected & wiped local session cookies")
             }.onFailure { err ->
-                showBanner(err.message ?: "Failed to remove site connection")
+                showBanner(CredentialRedactor.sanitizeDiagnostic(err.message, 140).ifBlank { "Failed to remove site connection" })
             }
         }
     }
@@ -1233,7 +1241,7 @@ class ForgeViewModel(application: Application) : AndroidViewModel(application) {
             videoCrf = cur.defaultVideoCrf,
             imageQuality = cur.defaultImageQuality,
             targetMbText = cur.defaultTargetSizeMb.toString(),
-            rawHalfSizeFast = cur.rawHalfSizeFast,
+            rawHalfSizeFast = cur.rawHalfSizeFast || deviceCapabilities.recommendRawHalfSizeByDefault,
             trimEnabled = false,
             trimStartMs = 0L,
             trimEndMs = item.durationMs,
@@ -1247,18 +1255,23 @@ class ForgeViewModel(application: Application) : AndroidViewModel(application) {
     }
 
     private fun loadPreviewForSelectedItem(index: Int) {
+        studioPreviewJob?.cancel()
+        studioPreviewJob = null
         val state = _studioSession.value ?: return
         val target = state.items.getOrNull(index) ?: return
         val cur = settings.value
-        viewModelScope.launch {
+        studioPreviewJob = viewModelScope.launch {
             _studioSession.update { curState ->
                 if (curState == null) null else curState.copy(isLoadingPreview = true)
             }
             val preview = imageRawEngine.loadEditorPreviewBitmap(Uri.parse(target.uriString), target)
+            var adopted = false
             _studioSession.update { latest ->
+                adopted = false
                 if (latest == null || latest.selectedItemIndex != index) {
                     return@update latest
                 }
+                adopted = true
                 val updatedItems = latest.items.toMutableList()
                 val updatedConfigs = latest.itemConfigs.toMutableList()
                 if (preview != null && target.effectiveWidth <= 0) {
@@ -1278,6 +1291,9 @@ class ForgeViewModel(application: Application) : AndroidViewModel(application) {
                     isLoadingPreview = false
                 )
             }
+            if (!adopted && preview != null && !preview.isRecycled) {
+                preview.recycle()
+            }
             val current = _studioSession.value
             if (current != null &&
                 current.selectedItemIndex == index &&
@@ -1292,6 +1308,8 @@ class ForgeViewModel(application: Application) : AndroidViewModel(application) {
     fun selectStudioItem(index: Int) {
         val cur = _studioSession.value ?: return
         if (index !in cur.items.indices || index == cur.selectedItemIndex) return
+        studioPreviewJob?.cancel()
+        studioPreviewJob = null
         samplePreviewJob?.cancel()
         _studioSession.update {
             it?.copy(
@@ -1349,6 +1367,8 @@ class ForgeViewModel(application: Application) : AndroidViewModel(application) {
     }
 
     fun closeStudioSession() {
+        studioPreviewJob?.cancel()
+        studioPreviewJob = null
         val activeSampleJob = samplePreviewJob
         samplePreviewJob = null
         activeSampleJob?.cancel()
@@ -1608,8 +1628,11 @@ class ForgeViewModel(application: Application) : AndroidViewModel(application) {
                         val previewBmp = currentState.previewBitmap ?: return@launch
                         if (previewBmp.isRecycled) return@launch
                         val res = imageRawEngine.generateImageSamplePreview(previewBmp, item, spec)
+                        var adopted = false
                         _studioSession.update { latest ->
+                            adopted = false
                             if (latest != null && latest.selectedItemIndex == itemIdx) {
+                                adopted = true
                                 latest.copy(
                                     originalSampleBitmap = res.originalBitmap,
                                     compressedSampleBitmap = res.compressedBitmap,
@@ -1619,6 +1642,10 @@ class ForgeViewModel(application: Application) : AndroidViewModel(application) {
                             } else {
                                 latest
                             }
+                        }
+                        if (!adopted) {
+                            if (!res.originalBitmap.isRecycled) res.originalBitmap.recycle()
+                            if (!res.compressedBitmap.isRecycled) res.compressedBitmap.recycle()
                         }
                     }
                     MediaKind.VIDEO -> {
@@ -1640,8 +1667,11 @@ class ForgeViewModel(application: Application) : AndroidViewModel(application) {
                             timestampMs = midpointMs,
                             workDir = workDir
                         )
+                        var adopted = false
                         _studioSession.update { latest ->
+                            adopted = false
                             if (latest != null && latest.selectedItemIndex == itemIdx) {
+                                adopted = true
                                 latest.copy(
                                     originalSampleBitmap = res.originalBitmap,
                                     compressedSampleBitmap = res.compressedBitmap,
@@ -1651,6 +1681,10 @@ class ForgeViewModel(application: Application) : AndroidViewModel(application) {
                             } else {
                                 latest
                             }
+                        }
+                        if (!adopted) {
+                            if (!res.originalBitmap.isRecycled) res.originalBitmap.recycle()
+                            if (!res.compressedBitmap.isRecycled) res.compressedBitmap.recycle()
                         }
                     }
                     else -> {
@@ -2687,10 +2721,14 @@ class ForgeViewModel(application: Application) : AndroidViewModel(application) {
                             res
                         }
                     }
+                    val cleanBaselineErr = CredentialRedactor.sanitizeDiagnostic(
+                        err.message,
+                        maxChars = 140
+                    ).ifBlank { "Could not extract reference frame" }
                     cur.copy(
                         isPreparingBaseline = false,
                         isRenderingSamples = false,
-                        baselineError = err.message ?: "Could not extract reference frame",
+                        baselineError = cleanBaselineErr,
                         renderedResults = clearedResults
                     )
                 }
@@ -2798,7 +2836,11 @@ class ForgeViewModel(application: Application) : AndroidViewModel(application) {
                 _ytDlpVersion.value = binaryManager.getYtDlpVersionName()
                 showBanner("yt-dlp update: ${status?.name ?: "Complete"}")
             }.onFailure { err ->
-                showBanner("yt-dlp update failed: ${err.message}")
+                val cleanErr = CredentialRedactor.sanitizeDiagnostic(
+                    err.message,
+                    maxChars = 140
+                ).ifBlank { "Unknown error" }
+                showBanner("yt-dlp update failed: $cleanErr")
             }
             _isUpdatingYtDlp.value = false
         }

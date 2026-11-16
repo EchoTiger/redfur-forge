@@ -3,8 +3,11 @@ package com.fissal.forge.engine
 import android.content.Context
 import android.graphics.Bitmap
 import android.graphics.BitmapFactory
+import com.fissal.forge.auth.CredentialRedactor
 import com.fissal.forge.domain.logic.AspectRatioSnapper
 import com.fissal.forge.domain.logic.BitrateBudgetCalculator
+import com.fissal.forge.domain.logic.DeviceCapabilityAdvisor
+import com.fissal.forge.domain.logic.DeviceCapabilityReport
 import com.fissal.forge.domain.logic.EncodePassMode
 import com.fissal.forge.domain.logic.FFmpegCommandBuilder
 import com.fissal.forge.domain.logic.SampleCalibrationRatio
@@ -68,8 +71,22 @@ data class VideoCandidateRenderResult(
  */
 class FFmpegCliEngine(
     private val appContext: Context,
-    private val binaryManager: NativeBinaryManager
+    private val binaryManager: NativeBinaryManager,
+    private val deviceCapabilities: DeviceCapabilityReport = DeviceCapabilityAdvisor.profileDevice(appContext)
 ) {
+
+    private val defaultSampleThreads: Int
+        get() = DeviceCapabilityAdvisor.computeSampleFfmpegThreads(deviceCapabilities)
+
+    private val maxSafeRasterDim: Int
+        get() = min(DeviceCapabilityAdvisor.GL_SAFE_MAX_TEXTURE_PX, deviceCapabilities.maxSafeRasterDimensionPx)
+
+    private val sampleIntermediatePixels: Long
+        get() = if (deviceCapabilities.snapshot.isLowRamDevice) {
+            DeviceCapabilityAdvisor.LOW_RAM_MAX_INTERMEDIATE_PIXELS
+        } else {
+            DeviceCapabilityAdvisor.DEFAULT_MAX_INTERMEDIATE_PIXELS
+        }
 
     suspend fun executePipeline(
         inputFile: File,
@@ -234,7 +251,10 @@ class FFmpegCliEngine(
         var compBitmap: Bitmap? = null
 
         try {
-            val plan = buildVideoSamplePlan(probe = probe, spec = spec, maxPreviewCap = 1280)
+            val maxPreviewCap = DeviceCapabilityAdvisor.computeSamplePreviewMaxDimPx(deviceCapabilities, 1280)
+            val sampleThreads = defaultSampleThreads
+            val sampleThreadsStr = sampleThreads.toString()
+            val plan = buildVideoSamplePlan(probe = probe, spec = spec, maxPreviewCap = maxPreviewCap)
             val timing = resolveSampleTiming(probe.durationMs, timestampMs)
             val refVf = buildReferenceFilter(plan.pixelCrop, plan.previewMaxDim)
 
@@ -247,7 +267,7 @@ class FFmpegCliEngine(
                     "-i", inputFile.absolutePath,
                     "-frames:v", "1",
                     "-vf", refVf,
-                    "-an", "-threads", "2",
+                    "-an", "-threads", sampleThreadsStr,
                     origPng.absolutePath
                 ),
                 label = "Sample reference frame"
@@ -259,7 +279,8 @@ class FFmpegCliEngine(
                 inputFile = inputFile,
                 sampleDir = sampleDir,
                 timing = timing,
-                plan = plan
+                plan = plan,
+                sampleThreads = sampleThreads
             )
 
             // Reference 1.0s baseline micro-clip for authentic compression calibration
@@ -274,7 +295,7 @@ class FFmpegCliEngine(
                         "-vf", refVf,
                         "-c:v", "libx264", "-preset", "ultrafast", "-crf", "20",
                         "-pix_fmt", "yuv420p",
-                        "-an", "-threads", "2",
+                        "-an", "-threads", sampleThreadsStr,
                         refClipFile.absolutePath
                     ),
                     label = "Sample reference clip"
@@ -290,15 +311,15 @@ class FFmpegCliEngine(
                     "-nostdin", "-y", "-hide_banner", "-loglevel", "error",
                     "-i", sampleFile.absolutePath,
                     "-frames:v", "1",
-                    "-an", "-threads", "2",
+                    "-an", "-threads", sampleThreadsStr,
                     compPng.absolutePath
                 ),
                 label = "Sample compressed frame decode"
             )
 
-            // Step C: Subsampled BitmapFactory decode (<= 1280px)
-            origBitmap = decodeSamplePngSafely(origPng, maxDim = 1280)
-            compBitmap = decodeSamplePngSafely(compPng, maxDim = 1280)
+            // Step C: Subsampled BitmapFactory decode bounded to hardware cap
+            origBitmap = decodeSamplePngSafely(origPng, maxDim = maxPreviewCap)
+            compBitmap = decodeSamplePngSafely(compPng, maxDim = maxPreviewCap)
 
             val samplePixels = (origBitmap.width.toDouble() * origBitmap.height.toDouble()).coerceAtLeast(1.0)
             val fullOutputPixels = if (plan.fullFinalW > 0 && plan.fullFinalH > 0) {
@@ -347,7 +368,8 @@ class FFmpegCliEngine(
         timestampMs: Long,
         workDir: File,
         outputPngFile: File,
-        maxPreviewDim: Int = 1920
+        maxPreviewDim: Int = 1920,
+        sampleThreads: Int = defaultSampleThreads
     ): VideoReferenceExtraction = withContext(Dispatchers.IO) {
         binaryManager.ensureInitialized()
         coroutineContext.ensureActive()
@@ -355,6 +377,7 @@ class FFmpegCliEngine(
         workDir.mkdirs()
         outputPngFile.parentFile?.mkdirs()
         val tempDir = File(workDir, "ref_${System.nanoTime()}").apply { mkdirs() }
+        val threadArg = sampleThreads.coerceIn(1, 4).toString()
 
         try {
             val timing = resolveSampleTiming(probe.durationMs, timestampMs)
@@ -365,7 +388,7 @@ class FFmpegCliEngine(
             } else {
                 null
             }
-            val safeCap = maxPreviewDim.coerceAtLeast(16)
+            val safeCap = DeviceCapabilityAdvisor.computeSamplePreviewMaxDimPx(deviceCapabilities, maxPreviewDim)
             val refVf = buildReferenceFilter(pixelCrop, safeCap)
 
             runSimpleFfmpegCommand(
@@ -375,7 +398,7 @@ class FFmpegCliEngine(
                     "-i", inputFile.absolutePath,
                     "-frames:v", "1",
                     "-vf", refVf,
-                    "-an", "-threads", "2",
+                    "-an", "-threads", threadArg,
                     outputPngFile.absolutePath
                 ),
                 label = "Sample Lab reference frame"
@@ -392,7 +415,7 @@ class FFmpegCliEngine(
                         "-vf", refVf,
                         "-c:v", "libx264", "-preset", "ultrafast", "-crf", "20",
                         "-pix_fmt", "yuv420p",
-                        "-an", "-threads", "2",
+                        "-an", "-threads", threadArg,
                         refClipFile.absolutePath
                     ),
                     label = "Sample Lab reference clip"
@@ -435,7 +458,8 @@ class FFmpegCliEngine(
         workDir: File,
         outputPngFile: File,
         referenceClipBytes: Long,
-        maxPreviewDim: Int = 1920
+        maxPreviewDim: Int = 1920,
+        sampleThreads: Int = defaultSampleThreads
     ): VideoCandidateRenderResult = withContext(Dispatchers.IO) {
         binaryManager.ensureInitialized()
         coroutineContext.ensureActive()
@@ -443,9 +467,10 @@ class FFmpegCliEngine(
         workDir.mkdirs()
         outputPngFile.parentFile?.mkdirs()
         val tempDir = File(workDir, "cand_${System.nanoTime()}").apply { mkdirs() }
+        val threadArg = sampleThreads.coerceIn(1, 4).toString()
 
         try {
-            val safeCap = maxPreviewDim.coerceAtLeast(16)
+            val safeCap = DeviceCapabilityAdvisor.computeSamplePreviewMaxDimPx(deviceCapabilities, maxPreviewDim)
             val plan = buildVideoSamplePlan(probe = probe, spec = spec, maxPreviewCap = safeCap)
             val timing = resolveSampleTiming(probe.durationMs, timestampMs)
 
@@ -453,7 +478,8 @@ class FFmpegCliEngine(
                 inputFile = inputFile,
                 sampleDir = tempDir,
                 timing = timing,
-                plan = plan
+                plan = plan,
+                sampleThreads = sampleThreads
             )
 
             runSimpleFfmpegCommand(
@@ -461,7 +487,7 @@ class FFmpegCliEngine(
                     "-nostdin", "-y", "-hide_banner", "-loglevel", "error",
                     "-i", sampleFile.absolutePath,
                     "-frames:v", "1",
-                    "-an", "-threads", "2",
+                    "-an", "-threads", threadArg,
                     outputPngFile.absolutePath
                 ),
                 label = "Sample Lab candidate decode"
@@ -660,8 +686,10 @@ class FFmpegCliEngine(
         inputFile: File,
         sampleDir: File,
         timing: VideoSampleTiming,
-        plan: VideoSamplePlan
+        plan: VideoSamplePlan,
+        sampleThreads: Int = defaultSampleThreads
     ): File {
+        val threadArg = sampleThreads.coerceIn(1, 4).toString()
         if (plan.isGif) {
             val gifFile = File(sampleDir, "sample.gif")
             val refPrefix = buildReferenceFilter(plan.pixelCrop, plan.previewMaxDim)
@@ -674,7 +702,7 @@ class FFmpegCliEngine(
                     "-t", timing.sampleDurArg,
                     "-filter_complex", gifFilter,
                     "-loop", "0",
-                    "-an", "-threads", "2",
+                    "-an", "-threads", threadArg,
                     gifFile.absolutePath
                 ),
                 label = "Sample GIF encode"
@@ -707,6 +735,7 @@ class FFmpegCliEngine(
                     codec = chosenCodec,
                     crf = plan.crf,
                     sampleBitrateBps = plan.sampleBitrateBps,
+                    sampleThreads = sampleThreads,
                     outputPath = encodedFile.absolutePath
                 ),
                 label = "Sample video encode (${chosenCodec.name})"
@@ -725,6 +754,7 @@ class FFmpegCliEngine(
                         codec = chosenCodec,
                         crf = plan.crf,
                         sampleBitrateBps = plan.sampleBitrateBps,
+                        sampleThreads = sampleThreads,
                         outputPath = encodedFile.absolutePath
                     ),
                     label = "Sample video fallback encode (HEVC)"
@@ -760,6 +790,7 @@ class FFmpegCliEngine(
         codec: VideoCodecChoice,
         crf: Int,
         sampleBitrateBps: Long?,
+        sampleThreads: Int,
         outputPath: String
     ): List<String> {
         val args = mutableListOf(
@@ -835,7 +866,7 @@ class FFmpegCliEngine(
                 }
             }
         }
-        args += listOf("-an", "-threads", "2", outputPath)
+        args += listOf("-an", "-threads", sampleThreads.coerceIn(1, 4).toString(), outputPath)
         return args
     }
 
@@ -868,7 +899,11 @@ class FFmpegCliEngine(
             coroutineContext.ensureActive()
             val exitCode = process.waitFor()
             if (exitCode != 0) {
-                throw IOException("$label failed (exit=$exitCode):\n${tailLines.joinToString("\n")}")
+                val safeTail = CredentialRedactor.sanitizeDiagnostic(
+                    tailLines.joinToString("\n"),
+                    maxChars = 480
+                )
+                throw IOException("$label failed (exit=$exitCode):\n$safeTail")
             }
         } finally {
             cancelHandle.dispose()
@@ -883,29 +918,12 @@ class FFmpegCliEngine(
         if (!file.exists() || file.length() <= 0L) {
             throw IOException("Missing sample frame file: ${file.name}")
         }
-        val bounds = BitmapFactory.Options().apply { inJustDecodeBounds = true }
-        BitmapFactory.decodeFile(file.absolutePath, bounds)
-        val sampleSize = calculateInSampleSize(bounds.outWidth, bounds.outHeight, maxDim)
-        return BitmapFactory.decodeFile(
-            file.absolutePath,
-            BitmapFactory.Options().apply {
-                inSampleSize = sampleSize
-                inPreferredConfig = Bitmap.Config.ARGB_8888
-            }
+        return SampleFrameEngine.decodeSampleFileSafely(
+            file = file,
+            maxDimensionPx = maxDim,
+            maxSafeTexturePx = maxSafeRasterDim,
+            maxIntermediatePixels = sampleIntermediatePixels
         ) ?: throw IOException("Failed to decode sample frame ${file.name}")
-    }
-
-    private fun calculateInSampleSize(width: Int, height: Int, maxDim: Int): Int {
-        var inSampleSize = 1
-        if (width <= 0 || height <= 0) return 1
-        var halfW = width
-        var halfH = height
-        while (max(halfW, halfH) > maxDim * 2) {
-            inSampleSize *= 2
-            halfW = width / inSampleSize
-            halfH = height / inSampleSize
-        }
-        return inSampleSize.coerceAtLeast(1)
     }
 
     private suspend fun runEncodeStrategy(
@@ -1087,7 +1105,7 @@ class FFmpegCliEngine(
                 "-i", inputFile.absolutePath,
                 "-vf", "scale=480:-2",
                 "-c:v", "libx264", "-preset", "ultrafast", "-crf", "26",
-                "-an", "-threads", "2",
+                "-an", "-threads", defaultSampleThreads.toString(),
                 "-f", "null", "/dev/null"
             )
             val pb = ProcessBuilder(cmd)
@@ -1216,10 +1234,14 @@ class FFmpegCliEngine(
             val exitCode = process.waitFor()
             if (exitCode != 0) {
                 val tail = synchronized(errRingBuffer) { errRingBuffer.joinToString("\n") }
-                throw IOException("FFmpeg failed (exit=$exitCode):\n$tail")
+                val safeTail = CredentialRedactor.sanitizeDiagnostic(tail, maxChars = 480)
+                throw IOException("FFmpeg failed (exit=$exitCode):\n$safeTail")
             }
         } finally {
             cancelHandle.dispose()
+            runCatching { process.inputStream.close() }
+            runCatching { process.outputStream.close() }
+            runCatching { process.errorStream.close() }
             if (process.isAlive) process.destroyForcibly()
         }
     }

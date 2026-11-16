@@ -255,6 +255,7 @@ class MainActivity : ComponentActivity() {
                             tabs = currentSampleLab.buildComparatorTabs(),
                             renderedResults = currentSampleLab.renderedResults,
                             activeTabId = currentSampleLab.fullscreenActiveTabId,
+                            deviceCapabilities = deviceCapabilities,
                             onSelectTab = viewModel::selectFullscreenComparatorTab,
                             onVote = viewModel::voteSampleLabCandidate,
                             onRemoveCandidate = viewModel::removeSampleLabCandidate,

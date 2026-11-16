@@ -2,9 +2,11 @@ package com.fissal.forge.pipeline
 
 import android.content.Context
 import android.net.Uri
+import android.os.StatFs
 import androidx.core.content.FileProvider
 import com.fissal.forge.auth.AuthErrorClassifier
 import com.fissal.forge.auth.AuthRequiredException
+import com.fissal.forge.auth.CredentialRedactor
 import com.fissal.forge.auth.ServiceCatalog
 import com.fissal.forge.auth.SiteAuthVault
 import com.fissal.forge.data.local.ForgeJobDao
@@ -49,6 +51,7 @@ import kotlinx.coroutines.NonCancellable
 import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.cancelAndJoin
 import kotlinx.coroutines.channels.Channel
+import kotlinx.coroutines.coroutineScope
 import kotlinx.coroutines.currentCoroutineContext
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.ensureActive
@@ -124,7 +127,7 @@ class PipelineOrchestrator(
 
     private val _metrics = MutableStateFlow(
         OrchestratorMetrics(
-            maxNetworkSlots = 3,
+            maxNetworkSlots = DeviceCapabilityAdvisor.effectiveNetworkSlots(deviceCapabilities, 3),
             maxComputeSlots = defaultComputeSlotsForDeviceRam()
         )
     )
@@ -144,6 +147,7 @@ class PipelineOrchestrator(
     init {
         scope.launch {
             jobDao.resetInterruptedJobs()
+            sweepOrphanedCacheDirs()
             refreshMetrics()
         }
     }
@@ -153,11 +157,12 @@ class PipelineOrchestrator(
         for (spec in specs) {
             val dl = spec.download ?: continue
             val id = UUID.randomUUID().toString()
-            val cleanTitle = dl.url.removePrefix("https://").removePrefix("http://").take(64)
+            val safeDisplayUrl = CredentialRedactor.redactUrlForDisplay(dl.url)
+            val cleanTitle = safeDisplayUrl.removePrefix("https://").removePrefix("http://").take(64)
             val entity = ForgeJobEntity(
                 id = id,
                 title = cleanTitle,
-                sourceLabel = dl.url,
+                sourceLabel = safeDisplayUrl,
                 sourceUriString = dl.url,
                 mediaKind = MediaKind.REMOTE_URL.name,
                 lane = JobLane.NETWORK.name,
@@ -203,10 +208,12 @@ class PipelineOrchestrator(
                         copyToClipboard = copyToClipboard,
                         globalSettings = settings
                     )
+                    val safeChipTitle = CredentialRedactor.redactUrlForDisplay(chip.title)
+                    val safeTrackTitle = CredentialRedactor.redactUrlForDisplay(track.title)
                     val id = UUID.randomUUID().toString()
                     val entity = ForgeJobEntity(
                         id = id,
-                        title = track.title,
+                        title = safeTrackTitle,
                         sourceLabel = "${chip.host.ifBlank { "playlist" }} • Track ${idx + 1}/$total",
                         sourceUriString = spec.download?.url ?: chip.cleanUrl,
                         mediaKind = MediaKind.REMOTE_URL.name,
@@ -216,7 +223,7 @@ class PipelineOrchestrator(
                         statusText = "Queued • ${spec.summaryLabel()}",
                         pipelineSpecJson = json.encodeToString(spec),
                         groupId = groupId,
-                        groupTitle = chip.title,
+                        groupTitle = safeChipTitle,
                         playlistIndex = idx + 1,
                         playlistTotal = total,
                         thumbnailUrl = track.thumbnailUrl ?: chip.thumbnailUrl
@@ -229,6 +236,7 @@ class PipelineOrchestrator(
                 // Playlist not yet resolved: reserve a group expander job and fan out tracks once metadata arrives
                 val groupId = "pl_${UUID.randomUUID()}"
                 val expanderId = "${groupId}_expander"
+                val safeChipTitle = CredentialRedactor.redactUrlForDisplay(chip.title)
                 val baseSpec = buildSpecFromLinkSettings(
                     chipUrl = chip.cleanUrl,
                     durationSec = chip.durationSec,
@@ -251,7 +259,7 @@ class PipelineOrchestrator(
                     statusText = "Fetching playlist tracklist...",
                     pipelineSpecJson = json.encodeToString(baseSpec),
                     groupId = groupId,
-                    groupTitle = chip.title,
+                    groupTitle = safeChipTitle,
                     playlistIndex = 1,
                     playlistTotal = 1,
                     thumbnailUrl = chip.thumbnailUrl
@@ -272,7 +280,8 @@ class PipelineOrchestrator(
                     selectedChapters = selectedChapters,
                     saveToDevice = saveToDevice,
                     copyToClipboard = copyToClipboard,
-                    globalSettings = settings
+                    globalSettings = settings,
+                    chipApproxBytes = chip.approxBytes
                 )
             } else {
                 val spec = buildSpecFromLinkSettings(
@@ -288,7 +297,7 @@ class PipelineOrchestrator(
                 val id = UUID.randomUUID().toString()
                 val entity = ForgeJobEntity(
                     id = id,
-                    title = chip.title,
+                    title = CredentialRedactor.redactUrlForDisplay(chip.title),
                     sourceLabel = "${chip.host.ifBlank { "web" }} • ${spec.summaryLabel()}",
                     sourceUriString = chip.cleanUrl,
                     mediaKind = MediaKind.REMOTE_URL.name,
@@ -297,6 +306,7 @@ class PipelineOrchestrator(
                     progress = 0f,
                     statusText = "Queued • ${spec.summaryLabel()}",
                     pipelineSpecJson = json.encodeToString(spec),
+                    inputBytes = chip.approxBytes?.coerceAtLeast(0L) ?: 0L,
                     thumbnailUrl = chip.thumbnailUrl
                 )
                 jobDao.upsert(entity)
@@ -317,12 +327,14 @@ class PipelineOrchestrator(
         selectedChapters: List<ChapterTrackItem>,
         saveToDevice: Boolean,
         copyToClipboard: Boolean,
-        globalSettings: ForgeSettings
+        globalSettings: ForgeSettings,
+        chipApproxBytes: Long? = null
     ): Int {
         if (selectedChapters.isEmpty()) return 0
         val groupId = "ch_${UUID.randomUUID()}"
         val total = selectedChapters.size
         val chapterEntries = ArrayList<ChapterJobEntry>(total)
+        val safeGroupTitle = CredentialRedactor.redactUrlForDisplay(chipTitle)
 
         for ((idx, chapter) in selectedChapters.withIndex()) {
             val effSettings = chapter.customSettings ?: defaultSettings
@@ -330,7 +342,7 @@ class PipelineOrchestrator(
             val customName = "${padChapterIndex(pos, total)} - ${chapter.title}"
             val chapterSpec = buildChapterPipelineSpec(
                 chipUrl = chipUrl,
-                chipTitle = chipTitle,
+                chipTitle = safeGroupTitle,
                 chipUploader = chipUploader,
                 chapter = chapter,
                 chapterIndex = pos,
@@ -343,7 +355,7 @@ class PipelineOrchestrator(
             )
             val entity = ForgeJobEntity(
                 id = UUID.randomUUID().toString(),
-                title = customName,
+                title = CredentialRedactor.redactUrlForDisplay(customName),
                 sourceLabel = "${chipHost.ifBlank { "chapters" }} • ${chapter.formattedRange()}",
                 sourceUriString = chipUrl,
                 mediaKind = MediaKind.REMOTE_URL.name,
@@ -353,7 +365,7 @@ class PipelineOrchestrator(
                 statusText = "Queued • ${chapterSpec.summaryLabel()}",
                 pipelineSpecJson = json.encodeToString(chapterSpec),
                 groupId = groupId,
-                groupTitle = chipTitle,
+                groupTitle = safeGroupTitle,
                 playlistIndex = pos,
                 playlistTotal = total,
                 thumbnailUrl = chipThumbnailUrl
@@ -366,7 +378,8 @@ class PipelineOrchestrator(
             groupId = groupId,
             sourceUrl = chipUrl,
             items = chapterEntries,
-            fallbackSettings = defaultSettings
+            fallbackSettings = defaultSettings,
+            estimatedInputBytes = chipApproxBytes?.coerceAtLeast(0L) ?: 0L
         )
         return chapterEntries.size
     }
@@ -617,7 +630,9 @@ class PipelineOrchestrator(
                 )
                 jobDao.deleteById(placeholder.id)
 
-                val resolvedTitle = meta.title.ifBlank { placeholder.groupTitle ?: "Media" }
+                val resolvedTitle = CredentialRedactor.redactUrlForDisplay(
+                    meta.title.ifBlank { placeholder.groupTitle ?: "Media" }
+                )
                 val tracks = meta.tracks.ifEmpty { emptyList() }
                 val metaSelectedChapters = meta.chapters.filter { it.selected }
                 if (tracks.isEmpty() && linkSettings.splitByChapters && metaSelectedChapters.size >= 2) {
@@ -631,7 +646,8 @@ class PipelineOrchestrator(
                         selectedChapters = metaSelectedChapters,
                         saveToDevice = saveToDevice,
                         copyToClipboard = copyToClipboard,
-                        globalSettings = settings
+                        globalSettings = settings,
+                        chipApproxBytes = meta.approxBytes
                     )
                 } else if (tracks.isEmpty()) {
                     val spec = buildSpecFromLinkSettings(
@@ -651,6 +667,7 @@ class PipelineOrchestrator(
                         status = JobStatus.QUEUED.name,
                         progress = 0f,
                         statusText = "Queued • ${spec.summaryLabel()}",
+                        inputBytes = meta.approxBytes?.coerceAtLeast(0L) ?: 0L,
                         groupId = null,
                         groupTitle = null,
                         playlistIndex = null,
@@ -675,7 +692,7 @@ class PipelineOrchestrator(
                         )
                         val trackEntity = ForgeJobEntity(
                             id = UUID.randomUUID().toString(),
-                            title = track.title,
+                            title = CredentialRedactor.redactUrlForDisplay(track.title),
                             sourceLabel = "$host • Track ${idx + 1}/$total",
                             sourceUriString = spec.download?.url ?: cleanUrl,
                             mediaKind = MediaKind.REMOTE_URL.name,
@@ -708,7 +725,10 @@ class PipelineOrchestrator(
                     if (authEx != null) {
                         handleAuthRequiredFailure(placeholder.id, cleanUrl, authEx)
                     } else {
-                        jobDao.markTerminalState(placeholder.id, JobStatus.FAILED.name, "Playlist resolve failed", t.message)
+                        val safeError = CredentialRedactor.sanitizeDiagnostic(
+                            t.message ?: t::class.java.simpleName
+                        )
+                        jobDao.markTerminalState(placeholder.id, JobStatus.FAILED.name, "Playlist resolve failed", safeError)
                     }
                 }
             } finally {
@@ -985,9 +1005,28 @@ class PipelineOrchestrator(
 
     fun clearAllCaches(): Long {
         var cleared = 0L
+        val activeKeys = HashSet<String>().apply {
+            addAll(activeCoroutines.keys)
+            addAll(activeChapterGroups.keys)
+        }
+        val activeExportFolderNames = activeCoroutines.keys
+            .map { safeExportFolderName(it) }
+            .toSet()
+
+        exportsDir.listFiles()?.forEach { child ->
+            if (child.name !in activeExportFolderNames) {
+                cleared += entrySizeBytes(child)
+                child.deleteRecursively()
+            }
+        }
+        jobsWorkRoot.listFiles()?.forEach { child ->
+            if (child.name !in activeKeys) {
+                cleared += entrySizeBytes(child)
+                child.deleteRecursively()
+            }
+        }
+
         listOf(
-            exportsDir,
-            jobsWorkRoot,
             File(appContext.cacheDir, "probe_staging"),
             File(appContext.cacheDir, "sample_preview"),
             File(appContext.cacheDir, "sample_lab")
@@ -1048,11 +1087,14 @@ class PipelineOrchestrator(
                     if (authEx != null) {
                         handleAuthRequiredFailure(initialEntity.id, targetUrl, authEx)
                     } else {
+                        val safeError = CredentialRedactor.sanitizeDiagnostic(
+                            t.message ?: t::class.java.simpleName
+                        )
                         jobDao.markTerminalState(
                             id = initialEntity.id,
                             status = JobStatus.FAILED.name,
                             statusText = "Failed",
-                            errorMessage = t.message ?: t::class.java.simpleName
+                            errorMessage = safeError
                         )
                     }
                 }
@@ -1074,7 +1116,8 @@ class PipelineOrchestrator(
         groupId: String,
         sourceUrl: String,
         items: List<ChapterJobEntry>,
-        fallbackSettings: LinkItemSettings?
+        fallbackSettings: LinkItemSettings?,
+        estimatedInputBytes: Long = 0L
     ) {
         if (items.isEmpty()) return
         pendingGroupCleanups[groupId]?.await()
@@ -1115,7 +1158,17 @@ class PipelineOrchestrator(
             }
 
             try {
-                val maxNet = { settingsState.value.maxConcurrentDownloads.coerceIn(1, 5) }
+                val estInputBytes = items.firstOrNull()?.entity?.inputBytes?.takeIf { it > 0L }
+                    ?: estimatedInputBytes.coerceAtLeast(0L)
+                val chapterTwoPass = items.any { it.spec.compress?.twoPass == true }
+                enforceScratchStoragePreflight(
+                    estimatedInputBytes = estInputBytes,
+                    chapterCount = items.size,
+                    hasTransformStage = true,
+                    twoPass = chapterTwoPass
+                )
+
+                val maxNet = { effectiveMaxNetworkSlots() }
                 val sharedDlDir = File(session.groupWorkDir, "shared_dl").apply {
                     deleteRecursively()
                     mkdirs()
@@ -1153,6 +1206,14 @@ class PipelineOrchestrator(
 
                 val sharedFile = downloadedFiles.firstOrNull()
                     ?: throw IOException("Shared chapter download produced no output file")
+
+                enforceScratchStoragePreflight(
+                    estimatedInputBytes = sharedFile.length(),
+                    chapterCount = session.trackedJobIds.size.coerceAtLeast(items.size).coerceAtLeast(1),
+                    hasTransformStage = true,
+                    twoPass = chapterTwoPass,
+                    alreadyStagedOnDisk = true
+                )
 
                 session.progressDbMutex.withLock {
                     for (id in session.trackedJobIds) {
@@ -1340,11 +1401,14 @@ class PipelineOrchestrator(
                                 emitEvent = emit
                             )
                         } else {
+                            val safeError = CredentialRedactor.sanitizeDiagnostic(
+                                t.message ?: t::class.java.simpleName
+                            )
                             jobDao.markTerminalState(
                                 id = entity.id,
                                 status = JobStatus.FAILED.name,
                                 statusText = "Failed",
-                                errorMessage = t.message ?: t::class.java.simpleName
+                                errorMessage = safeError
                             )
                         }
                     }
@@ -1494,17 +1558,26 @@ class PipelineOrchestrator(
         workDir: File
     ) {
         val dlSpec = spec.download ?: return
-        val maxNet = { settingsState.value.maxConcurrentDownloads.coerceIn(1, 5) }
+        enforceScratchStoragePreflight(
+            estimatedInputBytes = entity.inputBytes.coerceAtLeast(0L),
+            chapterCount = 1,
+            hasTransformStage = spec.hasTransformStage,
+            twoPass = spec.compress?.twoPass == true
+        )
+        val maxNet = { effectiveMaxNetworkSlots() }
 
         val downloadedFiles = networkPool.withSlots(cost = 1, capacityProvider = maxNet, onPoolChange = { refreshMetrics() }) {
             jobDao.updateProgress(entity.id, JobStatus.DOWNLOADING.name, "Starting yt-dlp...", 2f, JobLane.NETWORK.name)
             refreshMetrics()
-            ytDlpEngine.download(entity.id, dlSpec, File(workDir, "dl")) { pct, msg ->
-                scope.launch {
-                    if (!activeCoroutines.containsKey(entity.id)) return@launch
-                    val mappedPct = if (spec.hasTransformStage) pct * 0.55f else pct
-                    jobDao.updateProgress(entity.id, JobStatus.DOWNLOADING.name, msg, mappedPct, JobLane.NETWORK.name)
+            withConflatedProgressPump(
+                onTick = { pct, msg ->
+                    if (activeCoroutines.containsKey(entity.id)) {
+                        val mappedPct = if (spec.hasTransformStage) pct * 0.55f else pct
+                        jobDao.updateProgress(entity.id, JobStatus.DOWNLOADING.name, msg, mappedPct, JobLane.NETWORK.name)
+                    }
                 }
+            ) { emitProgress ->
+                ytDlpEngine.download(entity.id, dlSpec, File(workDir, "dl"), onProgress = emitProgress)
             }
         }
 
@@ -1519,6 +1592,13 @@ class PipelineOrchestrator(
             val probe = probeEngine.probeLocalFile(downloaded, dlSpec.url)
 
             if (spec.hasTransformStage) {
+                enforceScratchStoragePreflight(
+                    estimatedInputBytes = downloaded.length(),
+                    chapterCount = 1,
+                    hasTransformStage = true,
+                    twoPass = spec.compress?.twoPass == true,
+                    alreadyStagedOnDisk = true
+                )
                 val weight = computeSlotWeight(probe.mediaKind)
                 val maxCompute = { effectiveMaxComputeSlots() }
                 finalFile = computePool.withSlots(cost = weight, capacityProvider = maxCompute, onPoolChange = { refreshMetrics() }) {
@@ -1531,24 +1611,28 @@ class PipelineOrchestrator(
                         JobLane.COMPUTE.name
                     )
                     refreshMetrics()
-                    transformLocalFile(
-                        jobId = "${entity.id}_$index",
-                        sourceUri = Uri.fromFile(downloaded),
-                        stagedInput = downloaded,
-                        probe = probe,
-                        spec = spec,
-                        workDir = workDir
-                    ) { subPct, msg ->
-                        scope.launch {
-                            if (!activeCoroutines.containsKey(entity.id)) return@launch
-                            jobDao.updateProgress(
-                                entity.id,
-                                JobStatus.PROCESSING.name,
-                                msg,
-                                55f + (subPct * 0.43f),
-                                JobLane.COMPUTE.name
-                            )
+                    withConflatedProgressPump(
+                        onTick = { subPct, msg ->
+                            if (activeCoroutines.containsKey(entity.id)) {
+                                jobDao.updateProgress(
+                                    entity.id,
+                                    JobStatus.PROCESSING.name,
+                                    msg,
+                                    55f + (subPct * 0.43f),
+                                    JobLane.COMPUTE.name
+                                )
+                            }
                         }
+                    ) { emitProgress ->
+                        transformLocalFile(
+                            jobId = "${entity.id}_$index",
+                            sourceUri = Uri.fromFile(downloaded),
+                            stagedInput = downloaded,
+                            probe = probe,
+                            spec = spec,
+                            workDir = workDir,
+                            onProgress = emitProgress
+                        )
                     }
                 }
             } else {
@@ -1601,6 +1685,17 @@ class PipelineOrchestrator(
         val sourceUri = Uri.parse(uriStr)
         val probe = preProbed ?: probeEngine.probeUri(sourceUri)
 
+        enforceScratchStoragePreflight(
+            estimatedInputBytes = if (sourceUri.scheme == "file") {
+                probe.fileSizeBytes / 2L
+            } else {
+                probe.fileSizeBytes
+            },
+            chapterCount = 1,
+            hasTransformStage = true,
+            twoPass = spec.compress?.twoPass == true
+        )
+
         val weight = computeSlotWeight(probe.mediaKind)
         val maxCompute = { effectiveMaxComputeSlots() }
 
@@ -1614,18 +1709,22 @@ class PipelineOrchestrator(
                 null
             }
 
-            val processed = transformLocalFile(
-                jobId = entity.id,
-                sourceUri = sourceUri,
-                stagedInput = stagedInput,
-                probe = probe,
-                spec = spec,
-                workDir = workDir
-            ) { pct, msg ->
-                scope.launch {
-                    if (!activeCoroutines.containsKey(entity.id)) return@launch
-                    jobDao.updateProgress(entity.id, JobStatus.PROCESSING.name, msg, pct.coerceIn(0f, 98f), JobLane.COMPUTE.name)
+            val processed = withConflatedProgressPump(
+                onTick = { pct, msg ->
+                    if (activeCoroutines.containsKey(entity.id)) {
+                        jobDao.updateProgress(entity.id, JobStatus.PROCESSING.name, msg, pct.coerceIn(0f, 98f), JobLane.COMPUTE.name)
+                    }
                 }
+            ) { emitProgress ->
+                transformLocalFile(
+                    jobId = entity.id,
+                    sourceUri = sourceUri,
+                    stagedInput = stagedInput,
+                    probe = probe,
+                    spec = spec,
+                    workDir = workDir,
+                    onProgress = emitProgress
+                )
             }
 
             val outputName = buildOutputFilename(probe.displayName, processed.extension, spec)
@@ -1753,9 +1852,11 @@ class PipelineOrchestrator(
         return "${cleanBase}_$timestamp.$targetExt"
     }
 
+    private fun safeExportFolderName(jobId: String): String =
+        jobId.replace(Regex("""[^A-Za-z0-9._-]"""), "_").ifBlank { "job" }
+
     private fun jobExportDir(jobId: String): File {
-        val safeJobFolder = jobId.replace(Regex("""[^A-Za-z0-9._-]"""), "_").ifBlank { "job" }
-        return File(exportsDir, safeJobFolder)
+        return File(exportsDir, safeExportFolderName(jobId))
     }
 
     private fun stageExportFile(jobId: String, source: File, desiredName: String): File {
@@ -1793,13 +1894,88 @@ class PipelineOrchestrator(
         }
     }
 
+    private fun effectiveMaxNetworkSlots(): Int {
+        return DeviceCapabilityAdvisor.effectiveNetworkSlots(
+            report = deviceCapabilities,
+            requestedSlots = settingsState.value.maxConcurrentDownloads
+        )
+    }
+
     private fun effectiveMaxComputeSlots(): Int {
-        val override = settingsState.value.computeSlotsOverride
-        return if (override > 0) override else defaultComputeSlotsForDeviceRam()
+        return DeviceCapabilityAdvisor.effectiveComputeSlots(
+            report = deviceCapabilities,
+            computeSlotsOverride = settingsState.value.computeSlotsOverride
+        )
     }
 
     private fun defaultComputeSlotsForDeviceRam(): Int {
         return deviceCapabilities.recommendedComputeSlots
+    }
+
+    private fun sweepOrphanedCacheDirs() {
+        val activeKeys = HashSet<String>().apply {
+            addAll(activeCoroutines.keys)
+            addAll(activeChapterGroups.keys)
+        }
+        jobsWorkRoot.listFiles()?.forEach { child ->
+            if (child.name !in activeKeys) {
+                runCatching { child.deleteRecursively() }
+            }
+        }
+        val probeCutoffMs = System.currentTimeMillis() - 60_000L
+        File(appContext.cacheDir, "probe_staging").listFiles()?.forEach { child ->
+            if (child.lastModified() < probeCutoffMs) {
+                runCatching { child.deleteRecursively() }
+            }
+        }
+    }
+
+    private fun enforceScratchStoragePreflight(
+        estimatedInputBytes: Long = 0L,
+        chapterCount: Int = 1,
+        hasTransformStage: Boolean = true,
+        twoPass: Boolean = false,
+        alreadyStagedOnDisk: Boolean = false
+    ) {
+        val availableBytes = runCatching {
+            StatFs(jobsWorkRoot.absolutePath).availableBytes
+        }.getOrDefault(-1L)
+        if (availableBytes < 0L) return
+        val preflight = DeviceCapabilityAdvisor.evaluateStoragePreflight(
+            availableBytes = availableBytes,
+            estimatedInputBytes = estimatedInputBytes,
+            chapterOrBatchCount = chapterCount,
+            hasTransformStage = hasTransformStage,
+            twoPass = twoPass,
+            isSampleLab = false,
+            alreadyStagedOnDisk = alreadyStagedOnDisk
+        )
+        if (!preflight.sufficient) {
+            throw IOException(preflight.userFacingMessage ?: "Insufficient scratch storage")
+        }
+    }
+
+    private suspend fun <T> withConflatedProgressPump(
+        onTick: suspend (Float, String) -> Unit,
+        block: suspend (emitProgress: (Float, String) -> Unit) -> T
+    ): T = coroutineScope {
+        val channel = Channel<Pair<Float, String>>(Channel.CONFLATED)
+        val pump = launch {
+            for ((pct, msg) in channel) {
+                onTick(pct, msg)
+                delay(150L)
+            }
+        }
+        try {
+            block { pct, msg ->
+                channel.trySend(pct to msg)
+            }
+        } finally {
+            channel.close()
+            withContext(NonCancellable) {
+                pump.cancelAndJoin()
+            }
+        }
     }
 
     private fun refreshMetrics() {
@@ -1808,7 +1984,7 @@ class PipelineOrchestrator(
         val totalActive = activeCoroutines.size
         val next = OrchestratorMetrics(
             activeNetworkCount = netUsed,
-            maxNetworkSlots = settingsState.value.maxConcurrentDownloads.coerceIn(1, 5),
+            maxNetworkSlots = effectiveMaxNetworkSlots(),
             activeComputeSlotsUsed = compUsed,
             maxComputeSlots = effectiveMaxComputeSlots(),
             totalActiveJobs = totalActive
@@ -1826,6 +2002,11 @@ class PipelineOrchestrator(
         } else {
             ForgeForegroundService.stop(appContext)
         }
+    }
+
+    private fun entrySizeBytes(entry: File): Long {
+        if (!entry.exists()) return 0L
+        return if (entry.isDirectory) directorySizeBytes(entry) else entry.length()
     }
 
     private fun directorySizeBytes(dir: File): Long {
@@ -1858,59 +2039,5 @@ class PipelineOrchestrator(
         val sharedDownloadFailed = AtomicBoolean(false)
         val authEventEmitted = AtomicBoolean(false)
         val cleanupDone = CompletableDeferred<Unit>()
-    }
-
-    /**
-     * Deadlock-free weighted slot pool supporting atomic multi-slot acquisition and cancellation.
-     */
-    private class WeightedSlotPool {
-        private val mutex = Mutex()
-        private var used = 0
-        private val waiters = mutableListOf<CompletableDeferred<Unit>>()
-
-        fun currentUsed(): Int = used
-
-        suspend fun <T> withSlots(
-            cost: Int,
-            capacityProvider: () -> Int,
-            onPoolChange: () -> Unit,
-            block: suspend () -> T
-        ): T {
-            val effectiveCost = cost.coerceAtLeast(1)
-            var acquiredCost = 0
-            while (true) {
-                var waiter: CompletableDeferred<Unit>? = null
-                mutex.withLock {
-                    val cap = capacityProvider().coerceAtLeast(1)
-                    val clampedCost = effectiveCost.coerceAtMost(cap)
-                    if (used + clampedCost <= cap) {
-                        used += clampedCost
-                        acquiredCost = clampedCost
-                    } else {
-                        waiter = CompletableDeferred<Unit>().also { waiters.add(it) }
-                    }
-                }
-                if (waiter == null) break
-                try {
-                    waiter!!.await()
-                } catch (e: Throwable) {
-                    mutex.withLock { waiters.remove(waiter) }
-                    throw e
-                }
-            }
-
-            onPoolChange()
-            return try {
-                block()
-            } finally {
-                mutex.withLock {
-                    used = (used - acquiredCost).coerceAtLeast(0)
-                    val snapshot = waiters.toList()
-                    waiters.clear()
-                    snapshot.forEach { it.complete(Unit) }
-                }
-                onPoolChange()
-            }
-        }
     }
 }

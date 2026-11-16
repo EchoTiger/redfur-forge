@@ -87,6 +87,8 @@ import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.IntSize
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
+import com.fissal.forge.domain.logic.DeviceCapabilityAdvisor
+import com.fissal.forge.domain.logic.DeviceCapabilityReport
 import com.fissal.forge.domain.logic.FilesizeEstimator
 import com.fissal.forge.domain.logic.NormalizedViewportState
 import com.fissal.forge.domain.logic.TapZone
@@ -141,6 +143,7 @@ fun FullscreenSampleComparator(
     tabs: List<SampleCandidateSpec>,
     renderedResults: Map<String, RenderedSampleResult>,
     activeTabId: String,
+    deviceCapabilities: DeviceCapabilityReport? = null,
     onSelectTab: (String) -> Unit,
     onVote: (candidateId: String, SampleVoteState) -> Unit,
     onRemoveCandidate: (candidateId: String) -> Unit,
@@ -154,6 +157,29 @@ fun FullscreenSampleComparator(
     val density = LocalDensity.current
     val haptic = LocalHapticFeedback.current
     val tabRowState = rememberLazyListState()
+
+    val cacheMaxKb = remember(deviceCapabilities) {
+        deviceCapabilities?.let { DeviceCapabilityAdvisor.computeComparatorCacheBudgetKb(it) }
+            ?: COMPARATOR_BITMAP_CACHE_MAX_KB
+    }
+    val maxDecodeDimPx = remember(deviceCapabilities) {
+        deviceCapabilities?.let {
+            DeviceCapabilityAdvisor.computeSamplePreviewMaxDimPx(it, COMPARATOR_MAX_DECODE_DIM_PX)
+        } ?: COMPARATOR_MAX_DECODE_DIM_PX
+    }
+    val maxSafeTexturePx = remember(deviceCapabilities) {
+        minOf(
+            deviceCapabilities?.maxSafeRasterDimensionPx ?: DeviceCapabilityAdvisor.GL_SAFE_MAX_TEXTURE_PX,
+            DeviceCapabilityAdvisor.GL_SAFE_MAX_TEXTURE_PX
+        )
+    }
+    val maxIntermPixels = remember(deviceCapabilities) {
+        if (deviceCapabilities?.snapshot?.isLowRamDevice == true) {
+            DeviceCapabilityAdvisor.LOW_RAM_MAX_INTERMEDIATE_PIXELS
+        } else {
+            DeviceCapabilityAdvisor.DEFAULT_MAX_INTERMEDIATE_PIXELS
+        }
+    }
 
     var viewportSize by remember { mutableStateOf(IntSize.Zero) }
     var cameraState by remember { mutableStateOf(NormalizedViewportState()) }
@@ -178,9 +204,9 @@ fun FullscreenSampleComparator(
     val activeRendered = activeTab?.let { renderedResults[it.id] }
     val userCandidateCount = remember(tabs) { tabs.count { !it.isOriginalBaseline } }
 
-    // Bounded 48 MB ImageBitmap LruCache without recycling inside entryRemoved (GPU frame safety).
-    val bitmapCache = remember {
-        object : LruCache<String, ImageBitmap>(COMPARATOR_BITMAP_CACHE_MAX_KB) {
+    // Bounded hardware-aware ImageBitmap LruCache without recycling inside entryRemoved (GPU frame safety).
+    val bitmapCache = remember(cacheMaxKb) {
+        object : LruCache<String, ImageBitmap>(cacheMaxKb) {
             override fun sizeOf(key: String, value: ImageBitmap): Int {
                 val bytesPerPixel = when (value.config) {
                     ImageBitmapConfig.Alpha8 -> 1L
@@ -268,7 +294,9 @@ fun FullscreenSampleComparator(
                     } else {
                         SampleFrameEngine.decodeSampleFileSafely(
                             file = file,
-                            maxDimensionPx = COMPARATOR_MAX_DECODE_DIM_PX
+                            maxDimensionPx = maxDecodeDimPx,
+                            maxSafeTexturePx = maxSafeTexturePx,
+                            maxIntermediatePixels = maxIntermPixels
                         )
                     }
                 } catch (ce: CancellationException) {

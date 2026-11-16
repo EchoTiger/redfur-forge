@@ -9,8 +9,11 @@ import android.graphics.Rect
 import android.media.MediaMetadataRetriever
 import android.net.Uri
 import android.os.Build
+import android.os.StatFs
 import androidx.exifinterface.media.ExifInterface
 import com.fissal.forge.domain.logic.AspectRatioSnapper
+import com.fissal.forge.domain.logic.DeviceCapabilityAdvisor
+import com.fissal.forge.domain.logic.DeviceCapabilityReport
 import com.fissal.forge.domain.logic.SampleCalibrationRatio
 import com.fissal.forge.domain.model.CompressMode
 import com.fissal.forge.domain.model.CropSpec
@@ -49,16 +52,30 @@ data class ImageSamplePreviewResult(
  * - Uses BitmapRegionDecoder / inSampleSize subsampling for huge 100MP+ raster images.
  * - Supports binary-search target filesize compression & privacy EXIF stripping.
  */
-class ImageRawEngine(private val appContext: Context) {
+class ImageRawEngine(
+    private val appContext: Context,
+    private val deviceCapabilities: DeviceCapabilityReport = DeviceCapabilityAdvisor.profileDevice(appContext)
+) {
 
     // Prevent two 100MP+ RAW demosaics from hitting native memory concurrently
     private val rawMemorySemaphore = Semaphore(1)
+
+    private val maxSafeRasterDim: Int
+        get() = min(MAX_SAFE_RASTER_DIM, deviceCapabilities.maxSafeRasterDimensionPx)
+
+    private val maxIntermediatePixels: Long
+        get() = if (deviceCapabilities.snapshot.isLowRamDevice) {
+            DeviceCapabilityAdvisor.LOW_RAM_MAX_INTERMEDIATE_PIXELS
+        } else {
+            DeviceCapabilityAdvisor.DEFAULT_MAX_INTERMEDIATE_PIXELS
+        }
 
     suspend fun loadEditorPreviewBitmap(
         uri: Uri,
         probe: MediaProbeResult,
         maxDimension: Int = 1440
     ): Bitmap? = withContext(Dispatchers.IO) {
+        val safeMaxDim = min(maxDimension.coerceAtLeast(16), maxSafeRasterDim)
         runCatching {
             when (probe.mediaKind) {
                 MediaKind.CAMERA_RAW -> rawMemorySemaphore.withPermit {
@@ -76,7 +93,7 @@ class ImageRawEngine(private val appContext: Context) {
                                 raw.setHalfSize(true)
                                 if (raw.dcrawProcess() != 0) return@withPermit null
                                 val bmp = raw.getMutableBitmap(Bitmap.Config.ARGB_8888) ?: return@withPermit null
-                                downscaleIfNeeded(bmp, maxDimension)
+                                downscaleIfNeeded(bmp, safeMaxDim)
                             } finally {
                                 cancelHandle.dispose()
                             }
@@ -88,7 +105,7 @@ class ImageRawEngine(private val appContext: Context) {
                     appContext.contentResolver.openInputStream(uri)?.use {
                         BitmapFactory.decodeStream(it, null, opts)
                     }
-                    val sample = calculateInSampleSize(opts.outWidth, opts.outHeight, maxDimension)
+                    val sample = calculateInSampleSize(opts.outWidth, opts.outHeight, safeMaxDim)
                     val decodeOpts = BitmapFactory.Options().apply {
                         inSampleSize = sample
                         inPreferredConfig = Bitmap.Config.ARGB_8888
@@ -96,8 +113,7 @@ class ImageRawEngine(private val appContext: Context) {
                     val rawBmp = appContext.contentResolver.openInputStream(uri)?.use {
                         BitmapFactory.decodeStream(it, null, decodeOpts)
                     } ?: return@runCatching null
-                    val rotated = applyExifRotation(rawBmp, probe.rotationDegrees)
-                    downscaleIfNeeded(rotated, maxDimension)
+                    rotateAndBoundBitmap(rawBmp, probe.rotationDegrees, safeMaxDim)
                 }
                 MediaKind.VIDEO -> {
                     val retriever = MediaMetadataRetriever()
@@ -105,7 +121,7 @@ class ImageRawEngine(private val appContext: Context) {
                         retriever.setDataSource(appContext, uri)
                         val frame = retriever.getFrameAtTime(0L, MediaMetadataRetriever.OPTION_CLOSEST_SYNC)
                             ?: return@runCatching null
-                        downscaleIfNeeded(frame, maxDimension)
+                        downscaleIfNeeded(frame, safeMaxDim)
                     } finally {
                         runCatching { retriever.release() }
                     }
@@ -123,18 +139,44 @@ class ImageRawEngine(private val appContext: Context) {
         onProgress: (Float, String) -> Unit
     ): File = withContext(Dispatchers.IO) {
         onProgress(5f, "Allocating image decode pipeline...")
+        val targetParent = (outputFile.parentFile ?: appContext.cacheDir).apply { mkdirs() }
+        val availableBytes = runCatching { StatFs(targetParent.absolutePath).availableBytes }.getOrDefault(-1L)
+        if (availableBytes >= 0L) {
+            val preflight = DeviceCapabilityAdvisor.evaluateStoragePreflight(
+                availableBytes = availableBytes,
+                estimatedInputBytes = probe.fileSizeBytes.coerceAtMost(64L * 1024L * 1024L),
+                hasTransformStage = true,
+                isSampleLab = false
+            )
+            if (!preflight.sufficient) {
+                throw IOException(preflight.userFacingMessage ?: "Insufficient scratch storage")
+            }
+        }
+
         val targetExt = (spec.convert?.targetExtension ?: if (probe.mediaKind == MediaKind.CAMERA_RAW) "jpg" else probe.extension)
             .lowercase(Locale.US)
         val format = resolveCompressFormat(targetExt)
 
         val maxDimLimit = spec.compress?.maxDimensionPx
         val useHalfSize = spec.compress?.rawHalfSizeFast == true ||
+            deviceCapabilities.recommendRawHalfSizeByDefault ||
+            (probe.effectiveWidth <= 0 && deviceCapabilities.snapshot.largeHeapMemoryClassMb < 512) ||
             (maxDimLimit != null && probe.effectiveWidth > 0 && max(probe.effectiveWidth, probe.effectiveHeight) / 2 >= maxDimLimit)
 
         var workingBitmap: Bitmap = try {
             if (probe.mediaKind == MediaKind.CAMERA_RAW) {
                 onProgress(15f, "Demosaicing Camera RAW via LibRaw...")
-                decodeCameraRawSafely(sourceUri, useHalfSize)
+                try {
+                    decodeCameraRawSafely(sourceUri, useHalfSize)
+                } catch (oom: OutOfMemoryError) {
+                    if (!useHalfSize) {
+                        System.gc()
+                        onProgress(20f, "Retrying RAW demosaic in half-size mode...")
+                        decodeCameraRawSafely(sourceUri, halfSize = true)
+                    } else {
+                        throw oom
+                    }
+                }
             } else {
                 onProgress(15f, "Decoding image safely...")
                 decodeRasterSafely(sourceUri, probe, spec.crop, maxDimLimit)
@@ -158,9 +200,10 @@ class ImageRawEngine(private val appContext: Context) {
                 }
             }
 
-            if (maxDimLimit != null && max(workingBitmap.width, workingBitmap.height) > maxDimLimit) {
-                onProgress(68f, "Scaling to max ${maxDimLimit}px...")
-                workingBitmap = downscaleIfNeeded(workingBitmap, maxDimLimit)
+            val safeWorkingCap = maxDimLimit?.coerceAtMost(maxSafeRasterDim) ?: maxSafeRasterDim
+            if (max(workingBitmap.width, workingBitmap.height) > safeWorkingCap) {
+                onProgress(68f, "Scaling to max ${safeWorkingCap}px...")
+                workingBitmap = downscaleIfNeeded(workingBitmap, safeWorkingCap)
             }
 
             onProgress(78f, "Encoding ${targetExt.uppercase(Locale.US)}...")
@@ -187,6 +230,9 @@ class ImageRawEngine(private val appContext: Context) {
 
             onProgress(100f, "Complete")
             outputFile
+        } catch (oom: OutOfMemoryError) {
+            System.gc()
+            throw IOException("Image exceeded safe memory bounds during processing: ${oom.message}", oom)
         } finally {
             if (!workingBitmap.isRecycled) {
                 workingBitmap.recycle()
@@ -205,10 +251,11 @@ class ImageRawEngine(private val appContext: Context) {
         maxDimension: Int = 2048
     ): Bitmap = withContext(Dispatchers.IO) {
         coroutineContext.ensureActive()
-        val safeCap = maxDimension.coerceAtLeast(16)
+        val safeCap = DeviceCapabilityAdvisor.computeSamplePreviewMaxDimPx(deviceCapabilities, maxDimension)
         val useHalfSize = probe.mediaKind == MediaKind.CAMERA_RAW && (
-            (probe.effectiveWidth <= 0 && safeCap <= 2048) ||
-                (probe.effectiveWidth > 0 && max(probe.effectiveWidth, probe.effectiveHeight) / 2 >= safeCap)
+            deviceCapabilities.recommendRawHalfSizeByDefault ||
+                probe.effectiveWidth <= 0 ||
+                max(probe.effectiveWidth, probe.effectiveHeight) / 2 >= safeCap
             )
 
         var workingBitmap: Bitmap = try {
@@ -593,7 +640,7 @@ class ImageRawEngine(private val appContext: Context) {
         maxDimLimit: Int?,
         allowHighResCropHeadroom: Boolean = true
     ): Pair<Bitmap, Boolean> {
-        val safeDecodeCap = maxDimLimit?.coerceAtMost(MAX_SAFE_RASTER_DIM) ?: MAX_SAFE_RASTER_DIM
+        val safeDecodeCap = maxDimLimit?.coerceAtMost(maxSafeRasterDim) ?: maxSafeRasterDim
 
         // Fast memory-saving BitmapRegionDecoder path when cropping huge unrotated JPEGs/PNGs/WebPs
         if (crop != null && probe.rotationDegrees == 0 && probe.rawWidth > 0 && probe.rawHeight > 0 &&
@@ -623,13 +670,17 @@ class ImageRawEngine(private val appContext: Context) {
                     }
                 }
             }.getOrNull()
-            if (regionBitmap != null) return regionBitmap to true
+            if (regionBitmap != null) return downscaleIfNeeded(regionBitmap, safeDecodeCap) to true
         }
 
         // Standard downsampled decode
         val opts = BitmapFactory.Options().apply { inJustDecodeBounds = true }
         appContext.contentResolver.openInputStream(uri)?.use { BitmapFactory.decodeStream(it, null, opts) }
-        val targetCap = if (crop != null && allowHighResCropHeadroom) max(safeDecodeCap, 3840) else safeDecodeCap
+        val targetCap = if (crop != null && allowHighResCropHeadroom) {
+            max(safeDecodeCap, maxSafeRasterDim).coerceAtMost(maxSafeRasterDim)
+        } else {
+            safeDecodeCap
+        }
         val sample = calculateInSampleSize(opts.outWidth, opts.outHeight, targetCap)
 
         val decoded = appContext.contentResolver.openInputStream(uri)?.use { stream ->
@@ -643,7 +694,7 @@ class ImageRawEngine(private val appContext: Context) {
             )
         } ?: throw IOException("Failed to decode raster image $uri")
 
-        return applyExifRotation(decoded, probe.rotationDegrees) to false
+        return rotateAndBoundBitmap(decoded, probe.rotationDegrees, targetCap) to false
     }
 
     private fun resolveCompressFormat(targetExt: String): Bitmap.CompressFormat = when (targetExt) {
@@ -798,13 +849,28 @@ class ImageRawEngine(private val appContext: Context) {
         }
     }
 
-    private fun applyExifRotation(bitmap: Bitmap, rotationDegrees: Int): Bitmap {
+    private fun rotateAndBoundBitmap(bitmap: Bitmap, rotationDegrees: Int, maxDimension: Int): Bitmap {
         val norm = ((rotationDegrees % 360) + 360) % 360
-        if (norm == 0) return bitmap
-        val matrix = Matrix().apply { postRotate(norm.toFloat()) }
-        val rotated = Bitmap.createBitmap(bitmap, 0, 0, bitmap.width, bitmap.height, matrix, true)
-        if (rotated !== bitmap) bitmap.recycle()
-        return rotated
+        if (norm == 0) {
+            return downscaleIfNeeded(bitmap, maxDimension)
+        }
+        val rotatedW = if (norm == 90 || norm == 270) bitmap.height else bitmap.width
+        val rotatedH = if (norm == 90 || norm == 270) bitmap.width else bitmap.height
+        val maxRotatedSide = max(rotatedW, rotatedH)
+        val scale = if (maxDimension > 0 && maxRotatedSide > maxDimension) {
+            maxDimension.toFloat() / maxRotatedSide.toFloat()
+        } else {
+            1f
+        }
+        val matrix = Matrix().apply {
+            postRotate(norm.toFloat())
+            if (scale < 1f) {
+                postScale(scale, scale)
+            }
+        }
+        val transformed = Bitmap.createBitmap(bitmap, 0, 0, bitmap.width, bitmap.height, matrix, true)
+        if (transformed !== bitmap) bitmap.recycle()
+        return downscaleIfNeeded(transformed, maxDimension)
     }
 
     private fun downscaleIfNeeded(bitmap: Bitmap, maxDimension: Int): Bitmap {
@@ -819,20 +885,17 @@ class ImageRawEngine(private val appContext: Context) {
     }
 
     private fun calculateInSampleSize(width: Int, height: Int, maxDim: Int): Int {
-        var inSampleSize = 1
-        if (width <= 0 || height <= 0) return 1
-        var halfW = width
-        var halfH = height
-        while (max(halfW, halfH) > maxDim * 2) {
-            inSampleSize *= 2
-            halfW = width / inSampleSize
-            halfH = height / inSampleSize
-        }
-        return inSampleSize.coerceAtLeast(1)
+        return DeviceCapabilityAdvisor.calculateSafeInSampleSize(
+            rawWidth = width,
+            rawHeight = height,
+            targetMaxDimPx = maxDim,
+            maxSafeTexturePx = maxSafeRasterDim,
+            maxIntermediatePixels = maxIntermediatePixels
+        )
     }
 
     companion object {
-        private const val MAX_SAFE_RASTER_DIM = 3840
+        private const val MAX_SAFE_RASTER_DIM = DeviceCapabilityAdvisor.GL_SAFE_MAX_TEXTURE_PX
         private val REGION_DECODABLE_EXTENSIONS = setOf("jpg", "jpeg", "png", "webp")
         private val SAFE_EXIF_TAGS = listOf(
             ExifInterface.TAG_MAKE,

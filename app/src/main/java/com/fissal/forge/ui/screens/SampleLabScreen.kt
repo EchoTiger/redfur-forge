@@ -179,6 +179,9 @@ private fun rememberSafeSampleImageBitmapReloadable(
                     )?.asImageBitmap()
                 } catch (ce: CancellationException) {
                     throw ce
+                } catch (_: OutOfMemoryError) {
+                    System.gc()
+                    null
                 } catch (_: Throwable) {
                     null
                 }

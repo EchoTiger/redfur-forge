@@ -72,4 +72,44 @@ class AppReleaseComparatorTest {
         val draftJson = """{"tag_name":"v1.2.1","draft":true,"assets":[]}"""
         assertNull(AppReleaseComparator.parseLatestReleaseJson(draftJson, listOf("arm64-v8a")))
     }
+
+    @Test
+    fun recognizesV2ReleaseAsNewerForPriorWavesAndExtractsChecksum() {
+        assertTrue(AppReleaseComparator.isRemoteNewer("1.2.0", "v2.0.0"))
+        assertTrue(AppReleaseComparator.isRemoteNewer("1.3.0", "v2.0.0"))
+        assertTrue(AppReleaseComparator.isRemoteNewer("1.4.0", "v2.0.0"))
+        assertTrue(AppReleaseComparator.isRemoteNewer("1.5.0", "v2.0.0"))
+        assertFalse(AppReleaseComparator.isRemoteNewer("2.0.0", "v2.0.0"))
+
+        val v2ShaArm64 = "a1b2c3d4e5f60718293a4b5c6d7e8f90123456789abcdef0123456789abcdef0"
+        val v2ShaUni = "fedcba9876543210fedcba9876543210fedcba9876543210fedcba9876543210"
+        val v2Json = """
+            {
+              "tag_name": "v2.0.0",
+              "name": "Redfur Forge v2.0.0",
+              "draft": false,
+              "html_url": "https://github.com/EchoTiger/redfur-forge/releases/tag/v2.0.0",
+              "body": "## Redfur Forge v2.0.0\n\n### SHA-256 Checksums\n- `redfur-forge-v2.0.0-arm64-v8a.apk`: `$v2ShaArm64`\n- `redfur-forge-v2.0.0-universal.apk`: `$v2ShaUni`",
+              "assets": [
+                {
+                  "name": "redfur-forge-v2.0.0-arm64-v8a.apk",
+                  "size": 74000000,
+                  "browser_download_url": "https://github.com/EchoTiger/redfur-forge/releases/download/v2.0.0/redfur-forge-v2.0.0-arm64-v8a.apk"
+                },
+                {
+                  "name": "redfur-forge-v2.0.0-universal.apk",
+                  "size": 236000000,
+                  "browser_download_url": "https://github.com/EchoTiger/redfur-forge/releases/download/v2.0.0/redfur-forge-v2.0.0-universal.apk"
+                }
+              ]
+            }
+        """.trimIndent()
+
+        val parsed = AppReleaseComparator.parseLatestReleaseJson(v2Json, listOf("arm64-v8a", "armeabi-v7a"))
+        assertNotNull(parsed)
+        assertEquals("v2.0.0", parsed?.tagName)
+        assertEquals("2.0.0", parsed?.versionName)
+        assertEquals("redfur-forge-v2.0.0-arm64-v8a.apk", parsed?.selectedAsset?.name)
+        assertEquals(v2ShaArm64, parsed?.expectedSha256)
+    }
 }

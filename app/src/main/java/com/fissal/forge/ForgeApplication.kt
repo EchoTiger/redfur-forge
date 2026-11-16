@@ -56,19 +56,19 @@ class ForgeApplication : Application() {
 
     override fun onCreate() {
         super.onCreate()
+        deviceCapabilities = DeviceCapabilityAdvisor.profileDevice(this)
         database = ForgeDatabase.getInstance(this)
         settingsRepository = ForgeSettingsRepository(this)
         siteAuthVault = SiteAuthVault(this)
         binaryManager = NativeBinaryManager(this)
         probeEngine = MediaProbeEngine(this, binaryManager)
-        imageRawEngine = ImageRawEngine(this)
-        ffmpegEngine = FFmpegCliEngine(this, binaryManager)
+        imageRawEngine = ImageRawEngine(this, deviceCapabilities)
+        ffmpegEngine = FFmpegCliEngine(this, binaryManager, deviceCapabilities)
         ytDlpEngine = YtDlpEngine(binaryManager, siteAuthVault)
-        sampleFrameEngine = SampleFrameEngine(this, ffmpegEngine, imageRawEngine, probeEngine)
+        sampleFrameEngine = SampleFrameEngine(this, ffmpegEngine, imageRawEngine, probeEngine, deviceCapabilities)
         mediaStoreExporter = MediaStoreExporter(this)
         clipboardExportManager = ClipboardExportManager(this)
         appUpdateManager = AppUpdateManager(this)
-        deviceCapabilities = DeviceCapabilityAdvisor.profileDevice(this)
 
         orchestrator = PipelineOrchestrator(
             appContext = this,

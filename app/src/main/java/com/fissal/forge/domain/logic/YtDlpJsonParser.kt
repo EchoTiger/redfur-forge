@@ -1,5 +1,6 @@
 package com.fissal.forge.domain.logic
 
+import com.fissal.forge.auth.CredentialRedactor
 import com.fissal.forge.domain.model.ChapterTrackItem
 import com.fissal.forge.domain.model.DetectedLinkKind
 import com.fissal.forge.domain.model.PlaylistTrackItem
@@ -98,7 +99,10 @@ object YtDlpJsonParser {
         val rawTitle = root.str("title")
             ?: root.str("playlist_title")
             ?: root.str("fulltitle")
-            ?: sourceUrl.removePrefix("https://").removePrefix("http://").take(64)
+            ?: CredentialRedactor.redactUrlForDisplay(sourceUrl)
+                .removePrefix("https://")
+                .removePrefix("http://")
+                .take(64)
 
         val uploader = root.str("uploader")
             ?: root.str("channel")
@@ -444,10 +448,14 @@ object YtDlpJsonParser {
 
     private fun fallbackMetadata(sourceUrl: String, host: String): ResolvedUrlMetadata {
         val kind = inferContentMediaHint(sourceUrl)
+        val safeTitle = CredentialRedactor.redactUrlForDisplay(sourceUrl)
+            .removePrefix("https://")
+            .removePrefix("http://")
+            .take(64)
         return ResolvedUrlMetadata(
             sourceUrl = sourceUrl,
             host = host,
-            title = sourceUrl.removePrefix("https://").removePrefix("http://").take(64),
+            title = safeTitle,
             detectedKind = kind,
             contentMediaKind = kind
         )

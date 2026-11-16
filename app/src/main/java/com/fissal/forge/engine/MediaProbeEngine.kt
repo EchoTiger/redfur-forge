@@ -12,9 +12,13 @@ import com.fissal.forge.domain.model.MediaProbeResult
 import com.homesoft.photo.libraw.LibRaw
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.async
+import kotlinx.coroutines.coroutineScope
 import kotlinx.coroutines.currentCoroutineContext
 import kotlinx.coroutines.ensureActive
+import kotlinx.coroutines.job
 import kotlinx.coroutines.withContext
+import kotlinx.coroutines.withTimeoutOrNull
 import org.json.JSONObject
 import java.io.File
 import java.io.FileOutputStream
@@ -323,12 +327,52 @@ class MediaProbeEngine(
         val pb = ProcessBuilder(cmd)
         pb.environment()["LD_LIBRARY_PATH"] = binaryManager.ldLibraryPath
 
-        val jsonText = runCatching {
-            val proc = pb.start()
-            val out = proc.inputStream.bufferedReader().readText()
-            proc.waitFor(10, TimeUnit.SECONDS)
-            out
-        }.getOrNull()
+        val proc = runCatching { pb.start() }.getOrNull()
+        val cancelHandle = if (proc != null) {
+            currentCoroutineContext().job.invokeOnCompletion { cause ->
+                if (cause is CancellationException) {
+                    proc.destroy()
+                    if (proc.isAlive) proc.destroyForcibly()
+                }
+            }
+        } else {
+            null
+        }
+        val jsonText = if (proc != null) {
+            try {
+                withTimeoutOrNull(10_000L) {
+                    coroutineScope {
+                        val stderrDrain = async(Dispatchers.IO) {
+                            val drainBuf = ByteArray(4096)
+                            runCatching {
+                                proc.errorStream.use { err ->
+                                    while (err.read(drainBuf) != -1) {
+                                        // Drain stderr concurrently so ffprobe never blocks on full pipe buffer
+                                    }
+                                }
+                            }
+                        }
+                        val out = proc.inputStream.bufferedReader().use { it.readText() }
+                        currentCoroutineContext().ensureActive()
+                        proc.waitFor()
+                        stderrDrain.await()
+                        out
+                    }
+                }
+            } catch (ce: CancellationException) {
+                throw ce
+            } catch (_: Throwable) {
+                null
+            } finally {
+                cancelHandle?.dispose()
+                runCatching { proc.inputStream.close() }
+                runCatching { proc.outputStream.close() }
+                runCatching { proc.errorStream.close() }
+                if (proc.isAlive) proc.destroyForcibly()
+            }
+        } else {
+            null
+        }
 
         if (jsonText.isNullOrBlank()) {
             return MediaProbeResult(uriString, displayName, mimeType, extension, initialKind, file.length())
