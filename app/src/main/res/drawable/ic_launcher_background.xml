@@ -1,13 +1,42 @@
 <?xml version="1.0" encoding="utf-8"?>
 <vector xmlns:android="http://schemas.android.com/apk/res/android"
+    xmlns:aapt="http://schemas.android.com/aapt"
     android:width="108dp"
     android:height="108dp"
     android:viewportWidth="108"
     android:viewportHeight="108">
+
+    <!-- Deep volcanic obsidian furnace canvas -->
     <path
-        android:fillColor="#0B0D12"
-        android:pathData="M0,0h108v108h-108z" />
+        android:fillColor="#0A0B0F"
+        android:pathData="M0,0 L108,0 L108,108 L0,108 Z" />
+
+    <!-- Subtle gunmetal 12-tooth clockwork gear ring silhouette -->
     <path
-        android:fillColor="#161B26"
-        android:pathData="M54,14L88,34v40L54,94L20,74V34z" />
+        android:fillColor="#14151D"
+        android:fillType="evenOdd"
+        android:pathData="M93.9,47.0 L99.7,49.2 L99.7,58.8 L93.9,61.0 L92.1,67.9 L96.0,72.7 L91.2,81.0 L85.0,80.0 L80.0,85.0 L81.0,91.2 L72.7,96.0 L67.9,92.1 L61.0,93.9 L58.8,99.7 L49.2,99.7 L47.0,93.9 L40.1,92.1 L35.3,96.0 L27.0,91.2 L28.0,85.0 L23.0,80.0 L16.8,81.0 L12.0,72.7 L15.9,67.9 L14.1,61.0 L8.3,58.8 L8.3,49.2 L14.1,47.0 L15.9,40.1 L12.0,35.3 L16.8,27.0 L23.0,28.0 L28.0,23.0 L27.0,16.8 L35.3,12.0 L40.1,15.9 L47.0,14.1 L49.2,8.3 L58.8,8.3 L61.0,14.1 L67.9,15.9 L72.7,12.0 L81.0,16.8 L80.0,23.0 L85.0,28.0 L91.2,27.0 L96.0,35.3 L92.1,40.1 Z M54,20 A34,34 0 1,0 54,88 A34,34 0 1,0 54,20 Z"
+        android:strokeWidth="0.8"
+        android:strokeColor="#221C22" />
+
+    <!-- Warm radial ember furnace glow -->
+    <path android:pathData="M0,0 L108,0 L108,108 L0,108 Z">
+        <aapt:attr name="android:fillColor">
+            <gradient
+                android:centerX="54"
+                android:centerY="54"
+                android:gradientRadius="52"
+                android:type="radial">
+                <item
+                    android:color="#FF361318"
+                    android:offset="0.0" />
+                <item
+                    android:color="#CC1A0E12"
+                    android:offset="0.45" />
+                <item
+                    android:color="#000A0B0F"
+                    android:offset="1.0" />
+            </gradient>
+        </aapt:attr>
+    </path>
 </vector>

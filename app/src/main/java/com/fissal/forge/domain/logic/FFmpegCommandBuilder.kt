@@ -23,7 +23,7 @@ enum class EncodePassMode {
  */
 object FFmpegCommandBuilder {
 
-    private val AUDIO_ONLY_EXTENSIONS = setOf("mp3", "m4a", "opus", "ogg", "flac", "wav")
+    private val AUDIO_ONLY_EXTENSIONS = setOf("mp3", "m4a", "aac", "opus", "ogg", "flac", "wav")
 
     fun resolveEffectiveVideoCodec(probe: MediaProbeResult, spec: PipelineSpec): VideoCodecChoice {
         val targetExt = (spec.convert?.targetExtension ?: probe.extension).lowercase(Locale.US)
@@ -99,12 +99,14 @@ object FFmpegCommandBuilder {
         )
 
         val isAudioOnly = targetExt in AUDIO_ONLY_EXTENSIONS || probe.mediaKind == MediaKind.AUDIO
+        val silenceSkipEnabled = spec.silenceSkip?.enabled == true || trim?.silenceSkip?.enabled == true
         val canFastStreamCopyTrim = trim != null &&
             trim.fastKeyframeCopy &&
             crop == null &&
             compress == null &&
             !trim.fadeInOut &&
             !trim.muteAudio &&
+            !silenceSkipEnabled &&
             (convert == null || convert.videoCodec == VideoCodecChoice.COPY)
 
         if (canFastStreamCopyTrim) {
@@ -427,6 +429,12 @@ object FFmpegCommandBuilder {
         val afParts = mutableListOf<String>()
         if (targetExt == "opus" || targetExt == "ogg") {
             afParts += "aresample=48000:resampler=soxr"
+        }
+        val silenceSpec = spec.silenceSkip?.takeIf { it.enabled } ?: trim?.silenceSkip?.takeIf { it.enabled }
+        if (silenceSpec != null) {
+            val durationSec = String.format(Locale.US, "%.3f", silenceSpec.minSilenceMs.coerceIn(50, 10_000) / 1000.0)
+            val thresholdDb = silenceSpec.thresholdDb.coerceIn(-90, 0)
+            afParts += "silenceremove=stop_periods=-1:stop_duration=$durationSec:stop_threshold=${thresholdDb}dB"
         }
         if (trim?.fadeInOut == true) {
             afParts += "afade=t=in:st=0:d=0.4"

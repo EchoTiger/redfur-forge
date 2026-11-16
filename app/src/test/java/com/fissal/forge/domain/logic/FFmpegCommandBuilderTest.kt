@@ -11,6 +11,7 @@ import com.fissal.forge.domain.model.DeliverySpec
 import com.fissal.forge.domain.model.MediaKind
 import com.fissal.forge.domain.model.MediaProbeResult
 import com.fissal.forge.domain.model.PipelineSpec
+import com.fissal.forge.domain.model.SilenceSkipSpec
 import com.fissal.forge.domain.model.TrimSpec
 import com.fissal.forge.domain.model.VideoCodecChoice
 import org.junit.Assert.assertFalse
@@ -142,5 +143,60 @@ class FFmpegCommandBuilderTest {
         )
         assertTrue(h1.contains("-pass") && h1.contains("1"))
         assertTrue(h2.contains("-pass") && h2.contains("2"))
+    }
+
+    @Test
+    fun silenceSkipInjectsSilenceremoveAndDisablesFastStreamCopyOnAudio() {
+        val sampleAudio = MediaProbeResult(
+            uriString = "file:///podcast.mp3",
+            displayName = "podcast.mp3",
+            mimeType = "audio/mpeg",
+            extension = "mp3",
+            mediaKind = MediaKind.AUDIO,
+            fileSizeBytes = 12_000_000L,
+            durationMs = 600_000L,
+            hasAudio = true
+        )
+
+        val specTopLevel = PipelineSpec(
+            convert = ConvertSpec("opus"),
+            trim = TrimSpec(startMs = 5_000L, endMs = 125_000L, fastKeyframeCopy = true, fadeInOut = true),
+            silenceSkip = SilenceSkipSpec(enabled = true, thresholdDb = -42, minSilenceMs = 750)
+        )
+        val cmdTop = FFmpegCommandBuilder.buildCommand("/podcast.mp3", "/out.opus", sampleAudio, specTopLevel)
+        assertFalse(cmdTop.contains("-c") && cmdTop.contains("copy"))
+        val afIdxTop = cmdTop.indexOf("-af")
+        assertTrue(afIdxTop >= 0)
+        val afTop = cmdTop[afIdxTop + 1]
+        assertTrue(afTop.contains("aresample=48000:resampler=soxr"))
+        assertTrue(afTop.contains("silenceremove=stop_periods=-1:stop_duration=0.750:stop_threshold=-42dB"))
+        assertTrue(afTop.contains("afade=t=in:st=0:d=0.4"))
+
+        val specTrimNested = PipelineSpec(
+            trim = TrimSpec(
+                startMs = 1_000L,
+                endMs = 60_000L,
+                fastKeyframeCopy = true,
+                silenceSkip = SilenceSkipSpec(enabled = true, thresholdDb = -38, minSilenceMs = 600)
+            )
+        )
+        val cmdNested = FFmpegCommandBuilder.buildCommand("/podcast.mp3", "/out.mp3", sampleAudio, specTrimNested)
+        assertFalse(cmdNested.contains("-c") && cmdNested.contains("copy"))
+        val afIdxNested = cmdNested.indexOf("-af")
+        assertTrue(afIdxNested >= 0)
+        assertTrue(cmdNested[afIdxNested + 1].contains("silenceremove=stop_periods=-1:stop_duration=0.600:stop_threshold=-38dB"))
+
+        val specDisabled = PipelineSpec(
+            trim = TrimSpec(
+                startMs = 1_000L,
+                endMs = 60_000L,
+                fastKeyframeCopy = true,
+                silenceSkip = SilenceSkipSpec(enabled = false)
+            ),
+            silenceSkip = SilenceSkipSpec(enabled = false)
+        )
+        val cmdDisabled = FFmpegCommandBuilder.buildCommand("/podcast.mp3", "/out.mp3", sampleAudio, specDisabled)
+        assertTrue(cmdDisabled.contains("-c") && cmdDisabled.contains("copy"))
+        assertFalse(cmdDisabled.contains("-af"))
     }
 }

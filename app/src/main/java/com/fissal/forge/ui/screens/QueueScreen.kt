@@ -23,13 +23,13 @@ import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.automirrored.rounded.QueueMusic
 import androidx.compose.material.icons.rounded.Close
 import androidx.compose.material.icons.rounded.ContentCopy
 import androidx.compose.material.icons.rounded.DeleteOutline
 import androidx.compose.material.icons.rounded.DeleteSweep
 import androidx.compose.material.icons.rounded.ExpandLess
 import androidx.compose.material.icons.rounded.ExpandMore
-import androidx.compose.material.icons.rounded.QueueMusic
 import androidx.compose.material.icons.rounded.Refresh
 import androidx.compose.material.icons.rounded.Share
 import androidx.compose.material3.ButtonDefaults
@@ -62,19 +62,26 @@ import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import coil.compose.AsyncImage
 import com.fissal.forge.data.local.ForgeJobEntity
+import com.fissal.forge.data.local.JobLane
 import com.fissal.forge.data.local.JobStatus
 import com.fissal.forge.pipeline.OrchestratorMetrics
+import com.fissal.forge.ui.components.DomainRolePill
+import com.fissal.forge.ui.components.EngineDomain
+import com.fissal.forge.ui.components.WorkshopDomainCard
 import com.fissal.forge.ui.theme.AmberActive
+import com.fissal.forge.ui.theme.ArcRelayCyan
 import com.fissal.forge.ui.theme.CoralError
 import com.fissal.forge.ui.theme.CrispWhite
+import com.fissal.forge.ui.theme.EmberFlame
 import com.fissal.forge.ui.theme.EmeraldSuccess
 import com.fissal.forge.ui.theme.MasserCrimson
+import com.fissal.forge.ui.theme.MoltenEmber
 import com.fissal.forge.ui.theme.MutedSteel
-import com.fissal.forge.ui.theme.ObsidianBg
 import com.fissal.forge.ui.theme.SecundaSilver
 import com.fissal.forge.ui.theme.SlateCard
 import com.fissal.forge.ui.theme.SlateOutline
 import com.fissal.forge.ui.theme.SlateSurface
+import com.fissal.forge.ui.theme.VolcanicObsidian
 import java.util.Locale
 
 private enum class QueueFilter(val label: String) {
@@ -157,18 +164,22 @@ fun QueueScreen(
     LazyColumn(
         modifier = Modifier
             .fillMaxSize()
-            .background(ObsidianBg),
+            .background(VolcanicObsidian),
         contentPadding = PaddingValues(16.dp),
         verticalArrangement = Arrangement.spacedBy(12.dp)
     ) {
         item(key = "queue_header") {
-            Card(
-                colors = CardDefaults.cardColors(containerColor = SlateSurface),
-                border = BorderStroke(1.dp, SlateOutline),
-                shape = RoundedCornerShape(16.dp)
+            val headerDomain = when {
+                metrics.activeComputeSlotsUsed > 0 -> EngineDomain.FORGE
+                metrics.activeNetworkCount > 0 -> EngineDomain.RELAY
+                else -> EngineDomain.DELIVERY
+            }
+            WorkshopDomainCard(
+                domain = headerDomain,
+                isActive = metrics.totalActiveJobs > 0,
+                contentPadding = PaddingValues(14.dp)
             ) {
                 Column(
-                    modifier = Modifier.padding(14.dp),
                     verticalArrangement = Arrangement.spacedBy(10.dp)
                 ) {
                     Row(
@@ -176,15 +187,28 @@ fun QueueScreen(
                         horizontalArrangement = Arrangement.SpaceBetween,
                         verticalAlignment = Alignment.CenterVertically
                     ) {
-                        Column {
+                        Column(verticalArrangement = Arrangement.spacedBy(2.dp)) {
+                            Row(
+                                verticalAlignment = Alignment.CenterVertically,
+                                horizontalArrangement = Arrangement.spacedBy(8.dp)
+                            ) {
+                                Text(
+                                    text = "${metrics.totalActiveJobs} active • ${jobs.size} total",
+                                    style = MaterialTheme.typography.titleMedium,
+                                    color = CrispWhite,
+                                    fontWeight = FontWeight.SemiBold
+                                )
+                                DomainRolePill(
+                                    domain = headerDomain,
+                                    label = when (headerDomain) {
+                                        EngineDomain.FORGE -> "Forging"
+                                        EngineDomain.RELAY -> "Relaying"
+                                        EngineDomain.DELIVERY -> "Standby"
+                                    }
+                                )
+                            }
                             Text(
-                                text = "${metrics.totalActiveJobs} active • ${jobs.size} total",
-                                style = MaterialTheme.typography.titleMedium,
-                                color = CrispWhite,
-                                fontWeight = FontWeight.SemiBold
-                            )
-                            Text(
-                                text = "Fetch ${metrics.activeNetworkCount}/${metrics.maxNetworkSlots} • Forge ${metrics.activeComputeSlotsUsed}/${metrics.maxComputeSlots} RAM",
+                                text = "Relay ${metrics.activeNetworkCount}/${metrics.maxNetworkSlots} • Forge ${metrics.activeComputeSlotsUsed}/${metrics.maxComputeSlots} RAM",
                                 style = MaterialTheme.typography.labelSmall,
                                 color = MutedSteel
                             )
@@ -317,24 +341,27 @@ private fun PlaylistGroupCard(
         group.allGroupJobs.sumOf { job ->
             when (job.statusEnum) {
                 JobStatus.COMPLETED -> 1.0
-                else -> job.progress.toDouble().coerceIn(0.0, 1.0)
+                else -> (job.progress.toDouble() / 100.0).coerceIn(0.0, 1.0)
             }
         }.toFloat() / totalCount.toFloat()
     }
 
     val totalInBytes = group.allGroupJobs.sumOf { it.inputBytes }
     val totalOutBytes = group.allGroupJobs.sumOf { it.outputBytes }
+    val groupDomain = when {
+        group.allGroupJobs.any { it.statusEnum == JobStatus.PROCESSING } -> EngineDomain.FORGE
+        activeCount > 0 -> EngineDomain.RELAY
+        completedCount == totalCount && totalCount > 0 -> EngineDomain.DELIVERY
+        else -> EngineDomain.RELAY
+    }
 
-    Card(
-        colors = CardDefaults.cardColors(containerColor = SlateSurface),
-        border = BorderStroke(
-            1.dp,
-            if (activeCount > 0) MasserCrimson.copy(alpha = 0.55f) else SlateOutline
-        ),
-        shape = RoundedCornerShape(16.dp)
+    WorkshopDomainCard(
+        domain = groupDomain,
+        isActive = activeCount > 0,
+        shape = RoundedCornerShape(16.dp),
+        contentPadding = PaddingValues(14.dp)
     ) {
         Column(
-            modifier = Modifier.padding(14.dp),
             verticalArrangement = Arrangement.spacedBy(10.dp)
         ) {
             // Playlist Header Row
@@ -361,7 +388,7 @@ private fun PlaylistGroupCard(
                             )
                         } else {
                             Icon(
-                                Icons.Rounded.QueueMusic,
+                                Icons.AutoMirrored.Rounded.QueueMusic,
                                 contentDescription = null,
                                 tint = MasserCrimson,
                                 modifier = Modifier.size(22.dp)
@@ -387,13 +414,23 @@ private fun PlaylistGroupCard(
                         },
                         style = MaterialTheme.typography.labelSmall,
                         color = when {
-                            activeCount > 0 -> AmberActive
+                            groupDomain == EngineDomain.FORGE && activeCount > 0 -> EmberFlame
+                            activeCount > 0 -> ArcRelayCyan
                             failedCount > 0 -> CoralError
                             completedCount == totalCount && totalCount > 0 -> EmeraldSuccess
                             else -> SecundaSilver
                         }
                     )
                 }
+
+                DomainRolePill(
+                    domain = groupDomain,
+                    label = when (groupDomain) {
+                        EngineDomain.FORGE -> "Forge"
+                        EngineDomain.RELAY -> "Relay"
+                        EngineDomain.DELIVERY -> "Ready"
+                    }
+                )
 
                 IconButton(onClick = { expanded = !expanded }, modifier = Modifier.size(32.dp)) {
                     Icon(
@@ -413,7 +450,8 @@ private fun PlaylistGroupCard(
                 color = when {
                     failedCount > 0 && activeCount == 0 -> CoralError
                     completedCount == totalCount && totalCount > 0 -> EmeraldSuccess
-                    else -> MasserCrimson
+                    groupDomain == EngineDomain.FORGE -> MoltenEmber
+                    else -> ArcRelayCyan
                 },
                 trackColor = SlateOutline
             )
@@ -496,7 +534,8 @@ private fun PlaylistTrackJobRow(
     onRetry: () -> Unit,
     onRemove: () -> Unit
 ) {
-    val statusColor = jobStatusColor(job.statusEnum)
+    val jobDomain = domainForJob(job)
+    val statusColor = jobStatusColor(job.statusEnum, jobDomain)
     Surface(
         color = SlateCard,
         shape = RoundedCornerShape(12.dp),
@@ -582,7 +621,7 @@ private fun PlaylistTrackJobRow(
 
             if (job.isActive) {
                 LinearProgressIndicator(
-                    progress = { job.progress.coerceIn(0f, 1f) },
+                    progress = { (job.progress / 100f).coerceIn(0f, 1f) },
                     modifier = Modifier
                         .fillMaxWidth()
                         .height(4.dp)
@@ -604,14 +643,15 @@ private fun StandaloneJobCard(
     onRetry: () -> Unit,
     onRemove: () -> Unit
 ) {
-    val statusColor = jobStatusColor(job.statusEnum)
-    Card(
-        colors = CardDefaults.cardColors(containerColor = SlateSurface),
-        border = BorderStroke(1.dp, SlateOutline),
-        shape = RoundedCornerShape(16.dp)
+    val jobDomain = domainForJob(job)
+    val statusColor = jobStatusColor(job.statusEnum, jobDomain)
+    WorkshopDomainCard(
+        domain = jobDomain,
+        isActive = job.isActive,
+        shape = RoundedCornerShape(16.dp),
+        contentPadding = PaddingValues(14.dp)
     ) {
         Column(
-            modifier = Modifier.padding(14.dp),
             verticalArrangement = Arrangement.spacedBy(8.dp)
         ) {
             Row(
@@ -649,7 +689,20 @@ private fun StandaloneJobCard(
                         overflow = TextOverflow.Ellipsis
                     )
                 }
-                StatusPill(job.statusEnum.name, statusColor)
+                Column(
+                    horizontalAlignment = Alignment.End,
+                    verticalArrangement = Arrangement.spacedBy(4.dp)
+                ) {
+                    DomainRolePill(
+                        domain = jobDomain,
+                        label = when (jobDomain) {
+                            EngineDomain.RELAY -> "Relay"
+                            EngineDomain.FORGE -> "Forge"
+                            EngineDomain.DELIVERY -> "Ready"
+                        }
+                    )
+                    StatusPill(job.statusEnum.name, statusColor)
+                }
             }
 
             Text(
@@ -662,7 +715,7 @@ private fun StandaloneJobCard(
 
             if (job.isActive) {
                 LinearProgressIndicator(
-                    progress = { job.progress.coerceIn(0f, 1f) },
+                    progress = { (job.progress / 100f).coerceIn(0f, 1f) },
                     modifier = Modifier
                         .fillMaxWidth()
                         .height(5.dp)
@@ -769,10 +822,19 @@ private fun StatusPill(label: String, color: Color) {
     }
 }
 
-private fun jobStatusColor(status: JobStatus): Color = when (status) {
+private fun domainForJob(job: ForgeJobEntity): EngineDomain = when {
+    job.statusEnum == JobStatus.COMPLETED -> EngineDomain.DELIVERY
+    job.statusEnum == JobStatus.DOWNLOADING -> EngineDomain.RELAY
+    job.statusEnum == JobStatus.PROCESSING -> EngineDomain.FORGE
+    job.lane == JobLane.NETWORK.name -> EngineDomain.RELAY
+    else -> EngineDomain.FORGE
+}
+
+private fun jobStatusColor(status: JobStatus, domain: EngineDomain): Color = when (status) {
     JobStatus.COMPLETED -> EmeraldSuccess
-    JobStatus.DOWNLOADING, JobStatus.PROCESSING -> AmberActive
-    JobStatus.QUEUED -> SecundaSilver
+    JobStatus.DOWNLOADING -> ArcRelayCyan
+    JobStatus.PROCESSING -> MoltenEmber
+    JobStatus.QUEUED -> if (domain == EngineDomain.RELAY) ArcRelayCyan else SecundaSilver
     JobStatus.FAILED, JobStatus.CANCELED -> CoralError
 }
 

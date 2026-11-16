@@ -4,6 +4,7 @@ import androidx.compose.foundation.BorderStroke
 import androidx.compose.foundation.Image
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
+import androidx.compose.foundation.interaction.MutableInteractionSource
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
@@ -15,6 +16,7 @@ import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
+import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
@@ -26,6 +28,7 @@ import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.rounded.CheckCircle
 import androidx.compose.material.icons.rounded.Close
+import androidx.compose.material.icons.rounded.Compare
 import androidx.compose.material.icons.rounded.Compress
 import androidx.compose.material.icons.rounded.ContentCopy
 import androidx.compose.material.icons.rounded.ContentCut
@@ -33,10 +36,6 @@ import androidx.compose.material.icons.rounded.Crop
 import androidx.compose.material.icons.rounded.ErrorOutline
 import androidx.compose.material.icons.rounded.Save
 import androidx.compose.material.icons.rounded.Transform
-import androidx.compose.material3.Button
-import androidx.compose.material3.ButtonDefaults
-import androidx.compose.material3.Card
-import androidx.compose.material3.CardDefaults
 import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.FilterChip
@@ -60,6 +59,7 @@ import androidx.compose.runtime.remember
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
+import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.asImageBitmap
 import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.text.font.FontWeight
@@ -70,36 +70,61 @@ import com.fissal.forge.data.local.ForgeJobEntity
 import com.fissal.forge.data.local.JobStatus
 import com.fissal.forge.domain.logic.AspectRatioSnapper
 import com.fissal.forge.domain.logic.BitrateBudgetCalculator
+import com.fissal.forge.domain.logic.DeviceCapabilityReport
+import com.fissal.forge.domain.logic.EstimatedSizeResult
+import com.fissal.forge.domain.logic.FilesizeEstimator
+import com.fissal.forge.domain.logic.SettingTopic
 import com.fissal.forge.domain.model.AspectPreset
 import com.fissal.forge.domain.model.AudioCodecChoice
 import com.fissal.forge.domain.model.CompressMode
 import com.fissal.forge.domain.model.CompressionTier
 import com.fissal.forge.domain.model.MediaKind
+import com.fissal.forge.domain.model.MediaProbeResult
+import com.fissal.forge.domain.model.PipelineSpec
 import com.fissal.forge.domain.model.VideoCodecChoice
 import com.fissal.forge.ui.StudioItemConfig
 import com.fissal.forge.ui.StudioSessionState
 import com.fissal.forge.ui.StudioToolTab
 import com.fissal.forge.ui.components.CropCanvasOverlay
+import com.fissal.forge.ui.components.DomainRolePill
+import com.fissal.forge.ui.components.EngineDomain
+import com.fissal.forge.ui.components.ForgeInfoTipButton
+import com.fissal.forge.ui.components.ForgePrimaryButton
+import com.fissal.forge.ui.components.LiveSizeEstimateBadge
+import com.fissal.forge.ui.components.WorkshopDomainCard
+import com.fissal.forge.ui.theme.AnvilGunmetal
+import com.fissal.forge.ui.theme.ArcRelayCyan
 import com.fissal.forge.ui.theme.CoralError
 import com.fissal.forge.ui.theme.CrispWhite
+import com.fissal.forge.ui.theme.EmberFlame
 import com.fissal.forge.ui.theme.EmeraldSuccess
+import com.fissal.forge.ui.theme.ForgeBevelOutline
+import com.fissal.forge.ui.theme.ForgeGold
+import com.fissal.forge.ui.theme.FurnaceCard
 import com.fissal.forge.ui.theme.MasserCrimson
+import com.fissal.forge.ui.theme.MoltenEmber
 import com.fissal.forge.ui.theme.MutedSteel
 import com.fissal.forge.ui.theme.ObsidianBg
+import com.fissal.forge.ui.theme.RelayCard
 import com.fissal.forge.ui.theme.SecundaSilver
 import com.fissal.forge.ui.theme.SlateCard
 import com.fissal.forge.ui.theme.SlateOutline
-import com.fissal.forge.ui.theme.SlateSurface
+import com.fissal.forge.ui.theme.VolcanicObsidian
 import kotlin.math.roundToInt
 import kotlin.math.roundToLong
+
+private val SampleActiveBadgeBg = Color(0xFFC43419)
 
 @OptIn(ExperimentalMaterial3Api::class, ExperimentalLayoutApi::class)
 @Composable
 fun StudioEditorScreen(
     state: StudioSessionState,
     jobs: List<ForgeJobEntity>,
+    deviceCapabilities: DeviceCapabilityReport,
+    buildSpecForItem: (probe: MediaProbeResult, cfg: StudioItemConfig, forceCompressSpec: Boolean) -> PipelineSpec,
     onUpdate: ((StudioItemConfig) -> StudioItemConfig) -> Unit,
     onSelectTab: (StudioToolTab) -> Unit,
+    onToggleSamplePreview: () -> Unit,
     onClearInlineWatch: () -> Unit,
     onSelectBatchItem: (Int) -> Unit,
     onApplySameType: () -> Unit,
@@ -119,6 +144,54 @@ fun StudioEditorScreen(
         }
     }
 
+    val activeSpec = remember(primary, state.activeConfig) {
+        buildSpecForItem(primary, state.activeConfig, false)
+    }
+    val activeEstimate = remember(primary, activeSpec, state.sampleCalibration) {
+        FilesizeEstimator.estimateLocalPipeline(primary, activeSpec, state.sampleCalibration)
+    }
+    val compressPreviewSpec = remember(primary, state.activeConfig) {
+        buildSpecForItem(primary, state.activeConfig, true)
+    }
+    val compressPreviewEstimate = remember(primary, compressPreviewSpec, state.sampleCalibration) {
+        FilesizeEstimator.estimateLocalPipeline(primary, compressPreviewSpec, state.sampleCalibration)
+    }
+    val batchTotalEstimate = remember(
+        state.items,
+        state.itemConfigs,
+        state.selectedItemIndex,
+        state.sampleCalibration
+    ) {
+        if (!state.isBatch) {
+            null
+        } else {
+            val perItem = state.items.mapIndexed { idx, probe ->
+                val cfg = state.itemConfigs[idx]
+                val cal = if (idx == state.selectedItemIndex) state.sampleCalibration else null
+                FilesizeEstimator.estimateLocalPipeline(
+                    probe = probe,
+                    spec = buildSpecForItem(probe, cfg, false),
+                    sampleCalibration = cal
+                )
+            }
+            val totalEst = perItem.sumOf { it.estimatedBytes }
+            val totalMin = perItem.sumOf { it.minBytes }
+            val totalMax = perItem.sumOf { it.maxBytes }
+            val totalSrc = perItem.mapNotNull { it.sourceBytes }.takeIf { it.size == perItem.size }?.sum()
+            val delta = totalSrc?.takeIf { it > 0L }?.let { src ->
+                (((totalEst - src).toDouble() / src.toDouble()) * 100.0).roundToInt()
+            }
+            EstimatedSizeResult(
+                estimatedBytes = totalEst,
+                minBytes = totalMin,
+                maxBytes = totalMax,
+                sourceBytes = totalSrc,
+                deltaPercent = delta,
+                isCalibratedFromSample = state.sampleCalibration != null
+            )
+        }
+    }
+
     // Inline quick completion watch sheet for Share -> Copy / Save & Copy workflows
     val watchedJob = if (state.inlineWatchJobIds.isNotEmpty()) {
         jobs.firstOrNull { it.id == state.inlineWatchJobIds.first() }
@@ -127,17 +200,23 @@ fun StudioEditorScreen(
     }
 
     Scaffold(
-        containerColor = ObsidianBg,
+        containerColor = VolcanicObsidian,
         topBar = {
             TopAppBar(
-                colors = TopAppBarDefaults.topAppBarColors(containerColor = SlateSurface),
+                colors = TopAppBarDefaults.topAppBarColors(containerColor = AnvilGunmetal),
                 title = {
                     Column {
-                        Text(
-                            text = if (state.isBatch) "Batch Studio (${state.items.size} files)" else "Quick Forge Studio",
-                            style = MaterialTheme.typography.titleMedium,
-                            color = CrispWhite
-                        )
+                        Row(
+                            verticalAlignment = Alignment.CenterVertically,
+                            horizontalArrangement = Arrangement.spacedBy(8.dp)
+                        ) {
+                            Text(
+                                text = if (state.isBatch) "Batch Studio (${state.items.size} files)" else "Quick Forge Studio",
+                                style = MaterialTheme.typography.titleMedium,
+                                color = CrispWhite
+                            )
+                            DomainRolePill(domain = EngineDomain.FORGE, label = "Forge")
+                        }
                         Text(
                             text = if (state.cameFromShareIntent) "Opened from Android Share Menu" else primary.displayName,
                             style = MaterialTheme.typography.bodySmall,
@@ -156,46 +235,69 @@ fun StudioEditorScreen(
         },
         bottomBar = {
             Surface(
-                color = SlateSurface,
+                color = AnvilGunmetal,
                 tonalElevation = 6.dp,
-                border = BorderStroke(1.dp, SlateOutline)
+                border = BorderStroke(1.dp, ForgeBevelOutline)
             ) {
-                Row(
+                Column(
                     modifier = Modifier
                         .fillMaxWidth()
-                        .padding(horizontal = 12.dp, vertical = 10.dp),
-                    horizontalArrangement = Arrangement.spacedBy(8.dp)
+                        .padding(horizontal = 12.dp, vertical = 8.dp),
+                    verticalArrangement = Arrangement.spacedBy(8.dp)
                 ) {
-                    OutlinedButton(
-                        onClick = { onExecute(false, true) },
-                        shape = RoundedCornerShape(12.dp),
-                        contentPadding = PaddingValues(horizontal = 10.dp, vertical = 12.dp),
-                        modifier = Modifier.weight(1f)
+                    Row(
+                        modifier = Modifier.fillMaxWidth(),
+                        horizontalArrangement = Arrangement.SpaceBetween,
+                        verticalAlignment = Alignment.CenterVertically
                     ) {
-                        Icon(Icons.Rounded.ContentCopy, contentDescription = null, modifier = Modifier.size(16.dp))
-                        Spacer(Modifier.width(4.dp))
-                        Text("Copy Only", maxLines = 1)
+                        LiveSizeEstimateBadge(
+                            estimate = activeEstimate,
+                            domain = EngineDomain.FORGE,
+                            prefix = if (state.isBatch) "Active" else "Est. Output"
+                        )
+                        if (batchTotalEstimate != null) {
+                            LiveSizeEstimateBadge(
+                                estimate = batchTotalEstimate,
+                                domain = EngineDomain.DELIVERY,
+                                prefix = "Batch"
+                            )
+                        }
                     }
 
-                    OutlinedButton(
-                        onClick = { onExecute(true, false) },
-                        shape = RoundedCornerShape(12.dp),
-                        contentPadding = PaddingValues(horizontal = 10.dp, vertical = 12.dp),
-                        modifier = Modifier.weight(0.9f)
+                    Row(
+                        modifier = Modifier.fillMaxWidth(),
+                        horizontalArrangement = Arrangement.spacedBy(8.dp),
+                        verticalAlignment = Alignment.CenterVertically
                     ) {
-                        Icon(Icons.Rounded.Save, contentDescription = null, modifier = Modifier.size(16.dp))
-                        Spacer(Modifier.width(4.dp))
-                        Text("Save", maxLines = 1)
-                    }
+                        OutlinedButton(
+                            onClick = { onExecute(false, true) },
+                            shape = RoundedCornerShape(12.dp),
+                            border = BorderStroke(1.dp, SlateOutline),
+                            contentPadding = PaddingValues(horizontal = 10.dp, vertical = 12.dp),
+                            modifier = Modifier.weight(1f)
+                        ) {
+                            Icon(Icons.Rounded.ContentCopy, contentDescription = null, modifier = Modifier.size(16.dp), tint = SecundaSilver)
+                            Spacer(Modifier.width(4.dp))
+                            Text("Copy Only", maxLines = 1, color = CrispWhite)
+                        }
 
-                    Button(
-                        onClick = { onExecute(true, true) },
-                        shape = RoundedCornerShape(12.dp),
-                        colors = ButtonDefaults.buttonColors(containerColor = MasserCrimson),
-                        contentPadding = PaddingValues(horizontal = 12.dp, vertical = 12.dp),
-                        modifier = Modifier.weight(1.25f)
-                    ) {
-                        Text("Save & Copy", fontWeight = FontWeight.Bold, maxLines = 1)
+                        OutlinedButton(
+                            onClick = { onExecute(true, false) },
+                            shape = RoundedCornerShape(12.dp),
+                            border = BorderStroke(1.dp, SlateOutline),
+                            contentPadding = PaddingValues(horizontal = 10.dp, vertical = 12.dp),
+                            modifier = Modifier.weight(0.9f)
+                        ) {
+                            Icon(Icons.Rounded.Save, contentDescription = null, modifier = Modifier.size(16.dp), tint = SecundaSilver)
+                            Spacer(Modifier.width(4.dp))
+                            Text("Save", maxLines = 1, color = CrispWhite)
+                        }
+
+                        ForgePrimaryButton(
+                            onClick = { onExecute(true, true) },
+                            text = "Save & Copy",
+                            modifier = Modifier.weight(1.25f)
+                        )
                     }
                 }
             }
@@ -213,14 +315,14 @@ fun StudioEditorScreen(
                     .padding(14.dp),
                 verticalArrangement = Arrangement.spacedBy(12.dp)
             ) {
-                // Detected Media Summary Header Card
-                Card(
-                    colors = CardDefaults.cardColors(containerColor = SlateSurface),
+                // Detected Media Summary Header Card (Molten Forge)
+                WorkshopDomainCard(
+                    domain = EngineDomain.FORGE,
+                    isActive = false,
                     shape = RoundedCornerShape(16.dp),
-                    border = BorderStroke(1.dp, SlateOutline)
+                    contentPadding = PaddingValues(12.dp)
                 ) {
                     Row(
-                        modifier = Modifier.padding(12.dp),
                         verticalAlignment = Alignment.CenterVertically,
                         horizontalArrangement = Arrangement.spacedBy(12.dp)
                     ) {
@@ -228,12 +330,12 @@ fun StudioEditorScreen(
                             modifier = Modifier
                                 .size(72.dp)
                                 .clip(RoundedCornerShape(10.dp))
-                                .background(ObsidianBg),
+                                .background(VolcanicObsidian),
                             contentAlignment = Alignment.Center
                         ) {
                             when {
                                 state.isLoadingPreview -> CircularProgressIndicator(
-                                    color = MasserCrimson,
+                                    color = EmberFlame,
                                     modifier = Modifier.size(24.dp),
                                     strokeWidth = 2.5.dp
                                 )
@@ -251,7 +353,7 @@ fun StudioEditorScreen(
                             }
                         }
 
-                        Column(modifier = Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(3.dp)) {
+                        Column(modifier = Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(4.dp)) {
                             Text(
                                 text = primary.displayName,
                                 style = MaterialTheme.typography.titleSmall,
@@ -270,12 +372,24 @@ fun StudioEditorScreen(
                                 style = MaterialTheme.typography.bodySmall,
                                 color = SecundaSilver
                             )
-                            if (primary.cameraModel != null) {
-                                Text(
-                                    text = primary.cameraModel,
-                                    style = MaterialTheme.typography.labelSmall,
-                                    color = MutedSteel
+                            Row(
+                                verticalAlignment = Alignment.CenterVertically,
+                                horizontalArrangement = Arrangement.spacedBy(8.dp)
+                            ) {
+                                LiveSizeEstimateBadge(
+                                    estimate = activeEstimate,
+                                    domain = EngineDomain.FORGE,
+                                    prefix = "Out"
                                 )
+                                if (primary.cameraModel != null) {
+                                    Text(
+                                        text = primary.cameraModel,
+                                        style = MaterialTheme.typography.labelSmall,
+                                        color = MutedSteel,
+                                        maxLines = 1,
+                                        overflow = TextOverflow.Ellipsis
+                                    )
+                                }
                             }
                         }
                     }
@@ -350,14 +464,14 @@ fun StudioEditorScreen(
                         }
 
                         Surface(
-                            color = if (isSelected) SlateCard else SlateSurface,
+                            color = if (isSelected) FurnaceCard else AnvilGunmetal,
                             shape = RoundedCornerShape(12.dp),
                             border = BorderStroke(
                                 width = if (isSelected) 1.5.dp else 1.dp,
                                 color = when {
-                                    isSelected -> MasserCrimson
-                                    isEnabled -> EmeraldSuccess.copy(alpha = 0.6f)
-                                    else -> SlateOutline
+                                    isSelected -> EmberFlame
+                                    isEnabled -> EmeraldSuccess.copy(alpha = 0.65f)
+                                    else -> ForgeBevelOutline
                                 }
                             ),
                             modifier = Modifier.clickable { onSelectTab(tab) }
@@ -370,7 +484,7 @@ fun StudioEditorScreen(
                                 Icon(
                                     imageVector = icon,
                                     contentDescription = null,
-                                    tint = if (isSelected) MasserCrimson else SecundaSilver,
+                                    tint = if (isSelected) EmberFlame else SecundaSilver,
                                     modifier = Modifier.size(16.dp)
                                 )
                                 Text(label, style = MaterialTheme.typography.labelMedium, color = CrispWhite)
@@ -387,35 +501,60 @@ fun StudioEditorScreen(
                     }
                 }
 
-                // Active Tool Editor Card
-                Card(
-                    colors = CardDefaults.cardColors(containerColor = SlateSurface),
+                // Active Tool Editor Card (Molten Forge)
+                WorkshopDomainCard(
+                    domain = EngineDomain.FORGE,
+                    isActive = false,
                     shape = RoundedCornerShape(16.dp),
-                    border = BorderStroke(1.dp, SlateOutline)
+                    contentPadding = PaddingValues(14.dp)
                 ) {
                     Column(
-                        modifier = Modifier.padding(14.dp),
                         verticalArrangement = Arrangement.spacedBy(12.dp)
                     ) {
+                        Row(
+                            modifier = Modifier.fillMaxWidth(),
+                            horizontalArrangement = Arrangement.SpaceBetween,
+                            verticalAlignment = Alignment.CenterVertically
+                        ) {
+                            DomainRolePill(
+                                domain = EngineDomain.FORGE,
+                                label = "Forge • ${state.activeTab.name}"
+                            )
+                            LiveSizeEstimateBadge(
+                                estimate = if (state.activeTab == StudioToolTab.COMPRESS) {
+                                    compressPreviewEstimate
+                                } else {
+                                    activeEstimate
+                                },
+                                domain = EngineDomain.FORGE,
+                                prefix = "Est."
+                            )
+                        }
+
                         when (state.activeTab) {
-                            StudioToolTab.CONVERT -> ConvertPanel(state, onUpdate)
-                            StudioToolTab.COMPRESS -> CompressPanel(state, onUpdate)
-                            StudioToolTab.TRIM -> TrimPanel(state, onUpdate)
+                            StudioToolTab.CONVERT -> ConvertPanel(state, deviceCapabilities, onUpdate)
+                            StudioToolTab.COMPRESS -> CompressPanel(
+                                state = state,
+                                previewEstimate = compressPreviewEstimate,
+                                deviceCapabilities = deviceCapabilities,
+                                onToggleSamplePreview = onToggleSamplePreview,
+                                onUpdate = onUpdate
+                            )
+                            StudioToolTab.TRIM -> TrimPanel(state, deviceCapabilities, onUpdate)
                             StudioToolTab.CROP -> CropPanel(state, onUpdate, onSelectCropPreset)
                         }
                     }
                 }
 
                 // Privacy & Metadata Nuance Strip
-                Card(
-                    colors = CardDefaults.cardColors(containerColor = SlateSurface),
+                WorkshopDomainCard(
+                    domain = EngineDomain.DELIVERY,
+                    isActive = false,
                     shape = RoundedCornerShape(14.dp),
-                    border = BorderStroke(1.dp, SlateOutline)
+                    contentPadding = PaddingValues(horizontal = 14.dp, vertical = 10.dp)
                 ) {
                     Row(
-                        modifier = Modifier
-                            .fillMaxWidth()
-                            .padding(horizontal = 14.dp, vertical = 10.dp),
+                        modifier = Modifier.fillMaxWidth(),
                         horizontalArrangement = Arrangement.SpaceBetween,
                         verticalAlignment = Alignment.CenterVertically
                     ) {
@@ -431,6 +570,11 @@ fun StudioEditorScreen(
                                 color = MutedSteel
                             )
                         }
+                        ForgeInfoTipButton(
+                            topic = SettingTopic.STRIP_METADATA,
+                            capabilityReport = deviceCapabilities
+                        )
+                        Spacer(Modifier.width(6.dp))
                         Switch(
                             checked = state.stripMetadata,
                             onCheckedChange = { checked -> onUpdate { it.copy(stripMetadata = checked) } }
@@ -449,16 +593,20 @@ fun StudioEditorScreen(
                         .background(ObsidianBg.copy(alpha = 0.88f)),
                     contentAlignment = Alignment.Center
                 ) {
-                    Card(
-                        colors = CardDefaults.cardColors(containerColor = SlateSurface),
+                    WorkshopDomainCard(
+                        domain = if (watchedJob.statusEnum == JobStatus.COMPLETED) {
+                            EngineDomain.DELIVERY
+                        } else {
+                            EngineDomain.FORGE
+                        },
+                        isActive = watchedJob.isActive,
                         shape = RoundedCornerShape(20.dp),
-                        border = BorderStroke(1.dp, SlateOutline),
+                        contentPadding = PaddingValues(20.dp),
                         modifier = Modifier
                             .fillMaxWidth()
                             .padding(24.dp)
                     ) {
                         Column(
-                            modifier = Modifier.padding(20.dp),
                             verticalArrangement = Arrangement.spacedBy(14.dp),
                             horizontalAlignment = Alignment.CenterHorizontally
                         ) {
@@ -480,14 +628,11 @@ fun StudioEditorScreen(
                                         style = MaterialTheme.typography.bodySmall,
                                         color = SecundaSilver
                                     )
-                                    Button(
+                                    ForgePrimaryButton(
                                         onClick = onClose,
-                                        colors = ButtonDefaults.buttonColors(containerColor = MasserCrimson),
-                                        shape = RoundedCornerShape(12.dp),
+                                        text = "Done",
                                         modifier = Modifier.fillMaxWidth()
-                                    ) {
-                                        Text("Done")
-                                    }
+                                    )
                                 }
                                 JobStatus.FAILED, JobStatus.CANCELED -> {
                                     Icon(
@@ -508,14 +653,14 @@ fun StudioEditorScreen(
                                             color = CoralError
                                         )
                                     }
-                                    Button(
+                                    ForgePrimaryButton(
                                         onClick = onClearInlineWatch,
+                                        text = "Back to Editor",
                                         modifier = Modifier.fillMaxWidth()
-                                    ) {
-                                        Text("Back to Editor")
-                                    }
+                                    )
                                 }
                                 else -> {
+                                    DomainRolePill(domain = EngineDomain.FORGE, label = "Forging")
                                     Text(
                                         text = "Forging Media...",
                                         style = MaterialTheme.typography.titleMedium,
@@ -528,7 +673,7 @@ fun StudioEditorScreen(
                                     )
                                     LinearProgressIndicator(
                                         progress = { (watchedJob.progress / 100f).coerceIn(0f, 1f) },
-                                        color = MasserCrimson,
+                                        color = MoltenEmber,
                                         trackColor = SlateCard,
                                         modifier = Modifier
                                             .fillMaxWidth()
@@ -556,6 +701,7 @@ fun StudioEditorScreen(
 @Composable
 private fun ConvertPanel(
     state: StudioSessionState,
+    deviceCapabilities: DeviceCapabilityReport,
     onUpdate: ((StudioItemConfig) -> StudioItemConfig) -> Unit
 ) {
     val kind = state.primaryItem.mediaKind
@@ -606,15 +752,22 @@ private fun ConvertPanel(
                 },
                 label = { Text(ext.uppercase()) },
                 colors = FilterChipDefaults.filterChipColors(
-                    selectedContainerColor = MasserCrimson.copy(alpha = 0.22f),
-                    selectedLabelColor = MasserCrimson
+                    selectedContainerColor = MoltenEmber.copy(alpha = 0.22f),
+                    selectedLabelColor = EmberFlame
                 )
             )
         }
     }
 
     if (kind == MediaKind.VIDEO && state.targetExtension in setOf("mp4", "mkv", "mov")) {
-        Text("Video Codec", style = MaterialTheme.typography.labelMedium, color = SecundaSilver)
+        Row(
+            modifier = Modifier.fillMaxWidth(),
+            horizontalArrangement = Arrangement.SpaceBetween,
+            verticalAlignment = Alignment.CenterVertically
+        ) {
+            Text("Video Codec", style = MaterialTheme.typography.labelMedium, color = SecundaSilver)
+            ForgeInfoTipButton(topic = SettingTopic.VIDEO_CODEC, capabilityReport = deviceCapabilities)
+        }
         FlowRow(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
             listOf(
                 VideoCodecChoice.AV1,
@@ -636,6 +789,9 @@ private fun ConvertPanel(
 @Composable
 private fun CompressPanel(
     state: StudioSessionState,
+    previewEstimate: EstimatedSizeResult,
+    deviceCapabilities: DeviceCapabilityReport,
+    onToggleSamplePreview: () -> Unit,
     onUpdate: ((StudioItemConfig) -> StudioItemConfig) -> Unit
 ) {
     val primary = state.primaryItem
@@ -649,6 +805,159 @@ private fun CompressPanel(
             checked = state.compressEnabled,
             onCheckedChange = { enabled -> onUpdate { it.copy(compressEnabled = enabled) } }
         )
+    }
+
+    // Inline Tap-to-Toggle Sample Frame Preview (zero fade lag, works in Target MB & Quality modes)
+    if (primary.isVisual) {
+        val origBmp = state.originalSampleBitmap ?: state.previewBitmap
+        val compBmp = state.compressedSampleBitmap
+        val hasCompressedSample = compBmp != null && !compBmp.isRecycled
+        val showingCompressed = state.showCompressedSample && hasCompressedSample
+        val displayBmp = if (showingCompressed) compBmp else origBmp
+
+        Surface(
+            color = FurnaceCard,
+            shape = RoundedCornerShape(14.dp),
+            border = BorderStroke(
+                width = 1.dp,
+                color = if (showingCompressed) ForgeGold.copy(alpha = 0.72f) else ForgeBevelOutline
+            )
+        ) {
+            Column(
+                modifier = Modifier.padding(10.dp),
+                verticalArrangement = Arrangement.spacedBy(8.dp)
+            ) {
+                Box(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .heightIn(min = 164.dp, max = 236.dp)
+                        .clip(RoundedCornerShape(10.dp))
+                        .background(VolcanicObsidian)
+                        .clickable(
+                            enabled = hasCompressedSample,
+                            interactionSource = remember { MutableInteractionSource() },
+                            indication = null,
+                            onClick = onToggleSamplePreview
+                        ),
+                    contentAlignment = Alignment.Center
+                ) {
+                    if (displayBmp != null && !displayBmp.isRecycled) {
+                        Image(
+                            bitmap = displayBmp.asImageBitmap(),
+                            contentDescription = if (showingCompressed) "Forge sample frame" else "Original frame",
+                            contentScale = ContentScale.Fit,
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .heightIn(min = 164.dp, max = 236.dp)
+                        )
+                    } else if (state.isLoadingPreview) {
+                        CircularProgressIndicator(
+                            color = EmberFlame,
+                            modifier = Modifier.size(26.dp),
+                            strokeWidth = 2.5.dp
+                        )
+                    } else {
+                        Text(
+                            text = "Preview unavailable",
+                            style = MaterialTheme.typography.labelMedium,
+                            color = MutedSteel
+                        )
+                    }
+
+                    // Crisp instant comparison corner pill
+                    Surface(
+                        color = if (showingCompressed) SampleActiveBadgeBg else RelayCard.copy(alpha = 0.92f),
+                        shape = RoundedCornerShape(8.dp),
+                        border = BorderStroke(
+                            1.dp,
+                            if (showingCompressed) ForgeGold.copy(alpha = 0.85f) else ArcRelayCyan.copy(alpha = 0.65f)
+                        ),
+                        modifier = Modifier
+                            .align(Alignment.TopStart)
+                            .padding(8.dp)
+                    ) {
+                        Text(
+                            text = if (showingCompressed) {
+                                "SAMPLE • ${previewEstimate.formattedWithDelta()}"
+                            } else if (primary.fileSizeBytes > 0L) {
+                                "ORIG • ${primary.formattedSize()}"
+                            } else {
+                                "ORIG"
+                            },
+                            style = MaterialTheme.typography.labelSmall,
+                            fontWeight = FontWeight.Bold,
+                            color = CrispWhite,
+                            modifier = Modifier.padding(horizontal = 8.dp, vertical = 4.dp)
+                        )
+                    }
+
+                    // Top-right calibration status pill
+                    Surface(
+                        color = AnvilGunmetal.copy(alpha = 0.88f),
+                        shape = RoundedCornerShape(8.dp),
+                        border = BorderStroke(1.dp, ForgeBevelOutline),
+                        modifier = Modifier
+                            .align(Alignment.TopEnd)
+                            .padding(8.dp)
+                    ) {
+                        Row(
+                            modifier = Modifier.padding(horizontal = 8.dp, vertical = 4.dp),
+                            verticalAlignment = Alignment.CenterVertically,
+                            horizontalArrangement = Arrangement.spacedBy(5.dp)
+                        ) {
+                            if (state.isGeneratingSample) {
+                                CircularProgressIndicator(
+                                    color = ForgeGold,
+                                    modifier = Modifier.size(11.dp),
+                                    strokeWidth = 1.8.dp
+                                )
+                                Text(
+                                    text = "Calibrating...",
+                                    style = MaterialTheme.typography.labelSmall,
+                                    color = ForgeGold
+                                )
+                            } else {
+                                Icon(
+                                    imageVector = Icons.Rounded.Compare,
+                                    contentDescription = null,
+                                    tint = if (hasCompressedSample) EmberFlame else MutedSteel,
+                                    modifier = Modifier.size(13.dp)
+                                )
+                                Text(
+                                    text = if (hasCompressedSample) "Tap to compare" else "Preparing sample",
+                                    style = MaterialTheme.typography.labelSmall,
+                                    color = SecundaSilver
+                                )
+                            }
+                        }
+                    }
+                }
+
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    horizontalArrangement = Arrangement.SpaceBetween,
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    Text(
+                        text = if (showingCompressed) {
+                            "Showing FORGE SAMPLE (tap to flip to Original)"
+                        } else if (hasCompressedSample) {
+                            "Showing ORIGINAL (tap to inspect Forge Sample)"
+                        } else {
+                            "Midpoint frame sample updates live as settings change"
+                        },
+                        style = MaterialTheme.typography.labelSmall,
+                        color = MutedSteel,
+                        modifier = Modifier.weight(1f)
+                    )
+                    Spacer(Modifier.width(8.dp))
+                    LiveSizeEstimateBadge(
+                        estimate = previewEstimate,
+                        domain = EngineDomain.FORGE
+                    )
+                }
+            }
+        }
     }
 
     FlowRow(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
@@ -665,6 +974,15 @@ private fun CompressPanel(
     }
 
     if (state.compressMode == CompressMode.TARGET_BYTES) {
+        Row(
+            modifier = Modifier.fillMaxWidth(),
+            horizontalArrangement = Arrangement.SpaceBetween,
+            verticalAlignment = Alignment.CenterVertically
+        ) {
+            Text("Target Size Presets", style = MaterialTheme.typography.labelMedium, color = SecundaSilver)
+            ForgeInfoTipButton(topic = SettingTopic.TARGET_FILESIZE, capabilityReport = deviceCapabilities)
+        }
+
         FlowRow(horizontalArrangement = Arrangement.spacedBy(8.dp), verticalArrangement = Arrangement.spacedBy(6.dp)) {
             listOf("2", "8", "10", "25", "50", "100").forEach { mb ->
                 FilterChip(
@@ -685,11 +1003,20 @@ private fun CompressPanel(
         )
 
         if (primary.mediaKind == MediaKind.VIDEO) {
-            Text(
-                text = "Perceptual Compression Engine",
-                style = MaterialTheme.typography.labelMedium,
-                color = SecundaSilver
-            )
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.SpaceBetween,
+                verticalAlignment = Alignment.CenterVertically
+            ) {
+                Text(
+                    text = "Perceptual Compression Engine",
+                    style = MaterialTheme.typography.labelMedium,
+                    color = SecundaSilver,
+                    modifier = Modifier.weight(1f)
+                )
+                ForgeInfoTipButton(topic = SettingTopic.TWO_PASS_ENCODING, capabilityReport = deviceCapabilities)
+                ForgeInfoTipButton(topic = SettingTopic.VIDEO_CODEC, capabilityReport = deviceCapabilities)
+            }
             FlowRow(
                 horizontalArrangement = Arrangement.spacedBy(8.dp),
                 verticalArrangement = Arrangement.spacedBy(6.dp)
@@ -738,14 +1065,33 @@ private fun CompressPanel(
         }
     } else {
         if (primary.mediaKind == MediaKind.IMAGE || primary.mediaKind == MediaKind.CAMERA_RAW) {
-            Text("Image Quality: ${state.imageQuality}%", style = MaterialTheme.typography.labelMedium, color = SecundaSilver)
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.SpaceBetween,
+                verticalAlignment = Alignment.CenterVertically
+            ) {
+                Text("Image Quality: ${state.imageQuality}%", style = MaterialTheme.typography.labelMedium, color = SecundaSilver)
+                ForgeInfoTipButton(topic = SettingTopic.CRF_SLIDER, capabilityReport = deviceCapabilities)
+            }
             Slider(
                 value = state.imageQuality.toFloat(),
                 onValueChange = { v -> onUpdate { it.copy(compressEnabled = true, imageQuality = v.roundToInt()) } },
                 valueRange = 35f..98f
             )
         } else {
-            Text("Video CRF (lower = higher quality): ${state.videoCrf}", style = MaterialTheme.typography.labelMedium, color = SecundaSilver)
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.SpaceBetween,
+                verticalAlignment = Alignment.CenterVertically
+            ) {
+                Text(
+                    text = "Video CRF (lower = higher quality): ${state.videoCrf}",
+                    style = MaterialTheme.typography.labelMedium,
+                    color = SecundaSilver,
+                    modifier = Modifier.weight(1f)
+                )
+                ForgeInfoTipButton(topic = SettingTopic.CRF_SLIDER, capabilityReport = deviceCapabilities)
+            }
             Slider(
                 value = state.videoCrf.toFloat(),
                 onValueChange = { v -> onUpdate { it.copy(compressEnabled = true, videoCrf = v.roundToInt()) } },
@@ -777,6 +1123,8 @@ private fun CompressPanel(
                 Text("Fast Half-Size RAW Demosaic", style = MaterialTheme.typography.bodySmall, color = CrispWhite)
                 Text("4x faster & ultra-low RAM for 60MP–100MP sensors", style = MaterialTheme.typography.labelSmall, color = MutedSteel)
             }
+            ForgeInfoTipButton(topic = SettingTopic.RAW_HALF_SIZE_FAST, capabilityReport = deviceCapabilities)
+            Spacer(Modifier.width(6.dp))
             Switch(
                 checked = state.rawHalfSizeFast,
                 onCheckedChange = { checked -> onUpdate { it.copy(compressEnabled = true, rawHalfSizeFast = checked) } }
@@ -788,6 +1136,7 @@ private fun CompressPanel(
 @Composable
 private fun TrimPanel(
     state: StudioSessionState,
+    deviceCapabilities: DeviceCapabilityReport,
     onUpdate: ((StudioItemConfig) -> StudioItemConfig) -> Unit
 ) {
     val totalMs = state.primaryItem.durationMs.coerceAtLeast(1000L)
@@ -868,6 +1217,8 @@ private fun TrimPanel(
             Text("Fast Keyframe Copy Cut", style = MaterialTheme.typography.bodySmall, color = CrispWhite)
             Text("Zero quality loss & near-instant when not re-encoding", style = MaterialTheme.typography.labelSmall, color = MutedSteel)
         }
+        ForgeInfoTipButton(topic = SettingTopic.FAST_KEYFRAME_TRIM, capabilityReport = deviceCapabilities)
+        Spacer(Modifier.width(6.dp))
         Switch(
             checked = state.fastKeyframeCopy,
             onCheckedChange = { checked -> onUpdate { it.copy(trimEnabled = true, fastKeyframeCopy = checked) } }
@@ -896,6 +1247,27 @@ private fun TrimPanel(
             checked = state.muteAudio,
             onCheckedChange = { checked -> onUpdate { it.copy(trimEnabled = true, muteAudio = checked) } }
         )
+    }
+
+    val isAudioOutput = state.primaryItem.mediaKind == MediaKind.AUDIO ||
+        state.targetExtension.lowercase() in setOf("mp3", "m4a", "aac", "opus", "ogg", "flac", "wav")
+    if (isAudioOutput) {
+        Row(
+            modifier = Modifier.fillMaxWidth(),
+            horizontalArrangement = Arrangement.SpaceBetween,
+            verticalAlignment = Alignment.CenterVertically
+        ) {
+            Column(modifier = Modifier.weight(1f)) {
+                Text("Dead-Air / Silence Skip", style = MaterialTheme.typography.bodySmall, color = CrispWhite)
+                Text("Tightens quiet gaps on audio exports", style = MaterialTheme.typography.labelSmall, color = MutedSteel)
+            }
+            ForgeInfoTipButton(topic = SettingTopic.DEAD_AIR_SKIP, capabilityReport = deviceCapabilities)
+            Spacer(Modifier.width(6.dp))
+            Switch(
+                checked = state.silenceSkipEnabled,
+                onCheckedChange = { checked -> onUpdate { it.copy(trimEnabled = true, silenceSkipEnabled = checked) } }
+            )
+        }
     }
 }
 
@@ -960,8 +1332,8 @@ private fun CropPanel(
                     Text(if (preset == AspectPreset.AUTO_CLOSEST) "Closest" else preset.label)
                 },
                 colors = FilterChipDefaults.filterChipColors(
-                    selectedContainerColor = MasserCrimson.copy(alpha = 0.22f),
-                    selectedLabelColor = MasserCrimson
+                    selectedContainerColor = MoltenEmber.copy(alpha = 0.22f),
+                    selectedLabelColor = EmberFlame
                 )
             )
         }

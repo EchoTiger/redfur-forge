@@ -26,13 +26,13 @@ import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.automirrored.rounded.QueueMusic
 import androidx.compose.material.icons.rounded.Bolt
 import androidx.compose.material.icons.rounded.CheckCircle
 import androidx.compose.material.icons.rounded.Clear
 import androidx.compose.material.icons.rounded.Close
 import androidx.compose.material.icons.rounded.ContentCopy
 import androidx.compose.material.icons.rounded.ContentPaste
-import androidx.compose.material.icons.rounded.DeleteOutline
 import androidx.compose.material.icons.rounded.Download
 import androidx.compose.material.icons.rounded.ErrorOutline
 import androidx.compose.material.icons.rounded.ExpandLess
@@ -40,14 +40,10 @@ import androidx.compose.material.icons.rounded.ExpandMore
 import androidx.compose.material.icons.rounded.FolderOpen
 import androidx.compose.material.icons.rounded.Image
 import androidx.compose.material.icons.rounded.MusicNote
-import androidx.compose.material.icons.rounded.QueueMusic
 import androidx.compose.material.icons.rounded.Refresh
 import androidx.compose.material.icons.rounded.Tune
 import androidx.compose.material.icons.rounded.Videocam
-import androidx.compose.material3.Button
 import androidx.compose.material3.ButtonDefaults
-import androidx.compose.material3.Card
-import androidx.compose.material3.CardDefaults
 import androidx.compose.material3.Checkbox
 import androidx.compose.material3.CheckboxDefaults
 import androidx.compose.material3.CircularProgressIndicator
@@ -83,6 +79,9 @@ import com.fissal.forge.data.local.ForgeJobEntity
 import com.fissal.forge.data.local.JobStatus
 import com.fissal.forge.data.settings.ForgeSettings
 import com.fissal.forge.domain.logic.BitrateBudgetCalculator
+import com.fissal.forge.domain.logic.DeviceCapabilityReport
+import com.fissal.forge.domain.logic.FilesizeEstimator
+import com.fissal.forge.domain.logic.SettingTopic
 import com.fissal.forge.domain.model.CompressionTier
 import com.fissal.forge.domain.model.DetectedLinkKind
 import com.fissal.forge.domain.model.DownloadMode
@@ -91,17 +90,30 @@ import com.fissal.forge.domain.model.LinkResolveState
 import com.fissal.forge.domain.model.ResolvedLinkChipItem
 import com.fissal.forge.domain.model.VideoCodecChoice
 import com.fissal.forge.pipeline.OrchestratorMetrics
+import com.fissal.forge.ui.components.DomainRolePill
+import com.fissal.forge.ui.components.EngineDomain
+import com.fissal.forge.ui.components.ForgeInfoTipButton
+import com.fissal.forge.ui.components.LiveSizeEstimateBadge
+import com.fissal.forge.ui.components.RelayPrimaryButton
+import com.fissal.forge.ui.components.WorkshopDomainCard
 import com.fissal.forge.ui.theme.AmberActive
+import com.fissal.forge.ui.theme.ArcRelayCyan
 import com.fissal.forge.ui.theme.CoralError
 import com.fissal.forge.ui.theme.CrispWhite
+import com.fissal.forge.ui.theme.EmberFlame
 import com.fissal.forge.ui.theme.EmeraldSuccess
+import com.fissal.forge.ui.theme.ForgeBevelOutline
+import com.fissal.forge.ui.theme.FurnaceCard
 import com.fissal.forge.ui.theme.MasserCrimson
+import com.fissal.forge.ui.theme.MoltenEmber
 import com.fissal.forge.ui.theme.MutedSteel
-import com.fissal.forge.ui.theme.ObsidianBg
+import com.fissal.forge.ui.theme.RelayBevelOutline
+import com.fissal.forge.ui.theme.RelayCard
 import com.fissal.forge.ui.theme.SecundaSilver
 import com.fissal.forge.ui.theme.SlateCard
 import com.fissal.forge.ui.theme.SlateOutline
 import com.fissal.forge.ui.theme.SlateSurface
+import com.fissal.forge.ui.theme.VolcanicObsidian
 import kotlin.math.roundToLong
 
 @OptIn(ExperimentalLayoutApi::class)
@@ -112,6 +124,7 @@ fun HubScreen(
     jobs: List<ForgeJobEntity>,
     metrics: OrchestratorMetrics,
     settings: ForgeSettings,
+    deviceCapabilities: DeviceCapabilityReport,
     onUrlTextChange: (String) -> Unit,
     onPasteClick: () -> Unit,
     onToggleChipExpand: (String) -> Unit,
@@ -140,10 +153,14 @@ fun HubScreen(
         }
     }
 
+    val batchEstimate = remember(resolvedLinks, settings.defaultVideoCrf) {
+        FilesizeEstimator.estimateBatchLinks(resolvedLinks, settings.defaultVideoCrf)
+    }
+
     LazyColumn(
         modifier = Modifier
             .fillMaxSize()
-            .background(ObsidianBg),
+            .background(VolcanicObsidian),
         contentPadding = PaddingValues(16.dp),
         verticalArrangement = Arrangement.spacedBy(14.dp)
     ) {
@@ -164,15 +181,14 @@ fun HubScreen(
             LocalStudioHeroCard(onPickFilesClick = onPickFilesClick)
         }
 
-        // 3. Batch URL Input & Quick Global Batch Presets
+        // 3. Batch URL Input & Quick Global Batch Presets (Arc-Relay Domain)
         item(key = "batch_url_input") {
-            Card(
-                colors = CardDefaults.cardColors(containerColor = SlateSurface),
-                border = BorderStroke(1.dp, SlateOutline),
-                shape = RoundedCornerShape(18.dp)
+            WorkshopDomainCard(
+                domain = EngineDomain.RELAY,
+                isActive = resolvedLinks.any { it.resolveState == LinkResolveState.RESOLVING },
+                contentPadding = PaddingValues(16.dp)
             ) {
                 Column(
-                    modifier = Modifier.padding(16.dp),
                     verticalArrangement = Arrangement.spacedBy(12.dp)
                 ) {
                     Row(
@@ -180,13 +196,19 @@ fun HubScreen(
                         horizontalArrangement = Arrangement.SpaceBetween,
                         verticalAlignment = Alignment.CenterVertically
                     ) {
-                        Column {
-                            Text(
-                                text = "Batch Link Forge",
-                                style = MaterialTheme.typography.titleMedium,
-                                color = CrispWhite,
-                                fontWeight = FontWeight.SemiBold
-                            )
+                        Column(modifier = Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(4.dp)) {
+                            Row(
+                                verticalAlignment = Alignment.CenterVertically,
+                                horizontalArrangement = Arrangement.spacedBy(8.dp)
+                            ) {
+                                Text(
+                                    text = "Batch Link Relay",
+                                    style = MaterialTheme.typography.titleMedium,
+                                    color = CrispWhite,
+                                    fontWeight = FontWeight.SemiBold
+                                )
+                                DomainRolePill(domain = EngineDomain.RELAY, label = "Relay Intake")
+                            }
                             Text(
                                 text = "Links auto-resolve into smart chips with per-item & bulk rules",
                                 style = MaterialTheme.typography.bodySmall,
@@ -195,13 +217,14 @@ fun HubScreen(
                         }
                         if (resolvedLinks.isNotEmpty()) {
                             Surface(
-                                color = MasserCrimson.copy(alpha = 0.16f),
-                                shape = RoundedCornerShape(20.dp)
+                                color = ArcRelayCyan.copy(alpha = 0.16f),
+                                shape = RoundedCornerShape(20.dp),
+                                border = BorderStroke(1.dp, ArcRelayCyan.copy(alpha = 0.35f))
                             ) {
                                 Text(
                                     text = "$totalQueuedItems item${if (totalQueuedItems == 1) "" else "s"}",
                                     style = MaterialTheme.typography.labelMedium,
-                                    color = MasserCrimson,
+                                    color = ArcRelayCyan,
                                     modifier = Modifier.padding(horizontal = 10.dp, vertical = 4.dp)
                                 )
                             }
@@ -226,7 +249,7 @@ fun HubScreen(
                                     Icon(
                                         Icons.Rounded.ContentPaste,
                                         contentDescription = "Paste clipboard",
-                                        tint = SecundaSilver
+                                        tint = ArcRelayCyan
                                     )
                                 }
                                 if (urlBatchText.isNotEmpty()) {
@@ -241,11 +264,11 @@ fun HubScreen(
                             }
                         },
                         colors = OutlinedTextFieldDefaults.colors(
-                            focusedBorderColor = MasserCrimson,
-                            unfocusedBorderColor = SlateOutline,
+                            focusedBorderColor = ArcRelayCyan,
+                            unfocusedBorderColor = RelayBevelOutline,
                             focusedTextColor = CrispWhite,
                             unfocusedTextColor = CrispWhite,
-                            cursorColor = MasserCrimson
+                            cursorColor = ArcRelayCyan
                         ),
                         shape = RoundedCornerShape(14.dp)
                     )
@@ -314,6 +337,8 @@ fun HubScreen(
                 ResolvedLinkChipCard(
                     chip = chip,
                     defaultTargetMb = settings.defaultTargetSizeMb,
+                    defaultVideoCrf = settings.defaultVideoCrf,
+                    deviceCapabilities = deviceCapabilities,
                     onToggleExpand = { onToggleChipExpand(chip.cleanUrl) },
                     onRetryResolve = { onRetryResolveLink(chip.cleanUrl) },
                     onRemove = { onRemoveChip(chip.cleanUrl) },
@@ -328,48 +353,61 @@ fun HubScreen(
 
             // 5. Batch Queue Action Bar
             item(key = "batch_actions") {
-                Card(
-                    colors = CardDefaults.cardColors(containerColor = SlateCard),
-                    border = BorderStroke(1.dp, MasserCrimson.copy(alpha = 0.35f)),
-                    shape = RoundedCornerShape(16.dp)
+                WorkshopDomainCard(
+                    domain = EngineDomain.RELAY,
+                    isActive = false,
+                    shape = RoundedCornerShape(16.dp),
+                    contentPadding = PaddingValues(14.dp)
                 ) {
                     Column(
-                        modifier = Modifier.padding(14.dp),
                         verticalArrangement = Arrangement.spacedBy(10.dp)
                     ) {
                         val hasCustomCap = resolvedLinks.any { (it.settings.targetSizeMb ?: 0.0) > 0.0 }
-                        Text(
-                            text = buildString {
-                                append("Ready: ${resolvedLinks.size} link${if (resolvedLinks.size == 1) "" else "s"} -> ")
-                                append("$totalQueuedItems queue job${if (totalQueuedItems == 1) "" else "s"}")
-                                if (hasCustomCap) append(" • Perceptual Target-Size Forge enabled")
-                            },
-                            style = MaterialTheme.typography.bodySmall,
-                            color = SecundaSilver
-                        )
                         Row(
                             modifier = Modifier.fillMaxWidth(),
-                            horizontalArrangement = Arrangement.spacedBy(10.dp)
+                            horizontalArrangement = Arrangement.SpaceBetween,
+                            verticalAlignment = Alignment.CenterVertically
+                        ) {
+                            Text(
+                                text = buildString {
+                                    append("Ready: ${resolvedLinks.size} link${if (resolvedLinks.size == 1) "" else "s"} -> ")
+                                    append("$totalQueuedItems queue job${if (totalQueuedItems == 1) "" else "s"}")
+                                    if (hasCustomCap) append(" • Post-Download Forge")
+                                },
+                                style = MaterialTheme.typography.bodySmall,
+                                color = SecundaSilver,
+                                modifier = Modifier.weight(1f)
+                            )
+                            if (batchEstimate != null) {
+                                Spacer(Modifier.width(8.dp))
+                                LiveSizeEstimateBadge(
+                                    estimate = batchEstimate,
+                                    domain = EngineDomain.RELAY,
+                                    prefix = "Batch"
+                                )
+                            }
+                        }
+                        Row(
+                            modifier = Modifier.fillMaxWidth(),
+                            horizontalArrangement = Arrangement.spacedBy(10.dp),
+                            verticalAlignment = Alignment.CenterVertically
                         ) {
                             OutlinedButton(
                                 onClick = { onQueueBatch(true, false) },
                                 modifier = Modifier.weight(1f),
-                                border = BorderStroke(1.dp, SlateOutline),
+                                border = BorderStroke(1.dp, RelayBevelOutline),
                                 colors = ButtonDefaults.outlinedButtonColors(contentColor = SecundaSilver)
                             ) {
                                 Icon(Icons.Rounded.ContentCopy, contentDescription = null, modifier = Modifier.size(16.dp))
                                 Spacer(Modifier.width(6.dp))
                                 Text("Copy Only", maxLines = 1)
                             }
-                            Button(
+                            RelayPrimaryButton(
                                 onClick = { onQueueBatch(false, true) },
-                                modifier = Modifier.weight(1.4f),
-                                colors = ButtonDefaults.buttonColors(containerColor = MasserCrimson, contentColor = CrispWhite)
-                            ) {
-                                Icon(Icons.Rounded.Download, contentDescription = null, modifier = Modifier.size(18.dp))
-                                Spacer(Modifier.width(6.dp))
-                                Text("Download & Forge ($totalQueuedItems)", maxLines = 1)
-                            }
+                                text = "Download & Forge ($totalQueuedItems)",
+                                icon = Icons.Rounded.Download,
+                                modifier = Modifier.weight(1.4f)
+                            )
                         }
                     }
                 }
@@ -419,16 +457,18 @@ private fun WorkflowPipelineDashboardCard(
             .take(3)
     }
 
-    Card(
-        colors = CardDefaults.cardColors(containerColor = SlateSurface),
-        border = BorderStroke(
-            1.dp,
-            if (metrics.totalActiveJobs > 0) MasserCrimson.copy(alpha = 0.55f) else SlateOutline
-        ),
-        shape = RoundedCornerShape(18.dp)
+    val dashboardDomain = when {
+        activeProcessing > 0 -> EngineDomain.FORGE
+        activeDownloading > 0 || resolvingCount > 0 -> EngineDomain.RELAY
+        else -> EngineDomain.DELIVERY
+    }
+
+    WorkshopDomainCard(
+        domain = dashboardDomain,
+        isActive = metrics.totalActiveJobs > 0 || resolvingCount > 0,
+        contentPadding = PaddingValues(16.dp)
     ) {
         Column(
-            modifier = Modifier.padding(16.dp),
             verticalArrangement = Arrangement.spacedBy(12.dp)
         ) {
             Row(
@@ -443,7 +483,11 @@ private fun WorkflowPipelineDashboardCard(
                     Icon(
                         imageVector = Icons.Rounded.Bolt,
                         contentDescription = null,
-                        tint = if (metrics.totalActiveJobs > 0) MasserCrimson else SecundaSilver,
+                        tint = when (dashboardDomain) {
+                            EngineDomain.FORGE -> EmberFlame
+                            EngineDomain.RELAY -> ArcRelayCyan
+                            EngineDomain.DELIVERY -> SecundaSilver
+                        },
                         modifier = Modifier.size(20.dp)
                     )
                     Column {
@@ -456,7 +500,7 @@ private fun WorkflowPipelineDashboardCard(
                         Text(
                             text = when {
                                 metrics.totalActiveJobs > 0 ->
-                                    "$activeDownloading fetching • $activeProcessing encoding • $queuedCount queued"
+                                    "$activeDownloading relaying • $activeProcessing forging • $queuedCount queued"
                                 jobs.isNotEmpty() -> "${jobs.count { it.statusEnum == JobStatus.COMPLETED }} completed in queue"
                                 else -> "Ready — resolve links or share local files"
                             },
@@ -481,7 +525,7 @@ private fun WorkflowPipelineDashboardCard(
                 }
             }
 
-            // 3-Stage Visual Pipeline Gauge
+            // 3-Stage Visual Pipeline Gauge (Relay Intake -> Relay Fetch -> Molten Forge)
             Row(
                 modifier = Modifier.fillMaxWidth(),
                 horizontalArrangement = Arrangement.spacedBy(8.dp)
@@ -499,11 +543,11 @@ private fun WorkflowPipelineDashboardCard(
                 )
                 PipelineStageTile(
                     modifier = Modifier.weight(1f),
-                    stageTitle = "2. Fetch",
+                    stageTitle = "2. Relay",
                     detail = "${metrics.activeNetworkCount} / ${metrics.maxNetworkSlots} slots",
                     fraction = if (metrics.maxNetworkSlots <= 0) 0f else
                         (metrics.activeNetworkCount.toFloat() / metrics.maxNetworkSlots.toFloat()).coerceIn(0f, 1f),
-                    accent = AmberActive
+                    accent = ArcRelayCyan
                 )
                 PipelineStageTile(
                     modifier = Modifier.weight(1f),
@@ -511,7 +555,7 @@ private fun WorkflowPipelineDashboardCard(
                     detail = "${metrics.activeComputeSlotsUsed} / ${metrics.maxComputeSlots} RAM",
                     fraction = if (metrics.maxComputeSlots <= 0) 0f else
                         (metrics.activeComputeSlotsUsed.toFloat() / metrics.maxComputeSlots.toFloat()).coerceIn(0f, 1f),
-                    accent = MasserCrimson
+                    accent = MoltenEmber
                 )
             }
 
@@ -550,7 +594,7 @@ private fun WorkflowPipelineDashboardCard(
                                         horizontalArrangement = Arrangement.spacedBy(6.dp)
                                     ) {
                                         Icon(
-                                            Icons.Rounded.QueueMusic,
+                                            Icons.AutoMirrored.Rounded.QueueMusic,
                                             contentDescription = null,
                                             tint = MasserCrimson,
                                             modifier = Modifier.size(16.dp)
@@ -646,21 +690,20 @@ private fun PipelineStageTile(
 
 @Composable
 private fun LocalStudioHeroCard(onPickFilesClick: () -> Unit) {
-    Card(
-        colors = CardDefaults.cardColors(containerColor = SlateCard),
-        border = BorderStroke(1.dp, SlateOutline),
-        shape = RoundedCornerShape(18.dp)
+    WorkshopDomainCard(
+        domain = EngineDomain.FORGE,
+        isActive = false,
+        onClick = onPickFilesClick,
+        contentPadding = PaddingValues(16.dp)
     ) {
         Row(
-            modifier = Modifier
-                .fillMaxWidth()
-                .clickable(onClick = onPickFilesClick)
-                .padding(16.dp),
+            modifier = Modifier.fillMaxWidth(),
             verticalAlignment = Alignment.CenterVertically,
             horizontalArrangement = Arrangement.spacedBy(14.dp)
         ) {
             Surface(
-                color = MasserCrimson.copy(alpha = 0.16f),
+                color = FurnaceCard,
+                border = BorderStroke(1.dp, ForgeBevelOutline),
                 shape = RoundedCornerShape(14.dp),
                 modifier = Modifier.size(48.dp)
             ) {
@@ -668,18 +711,24 @@ private fun LocalStudioHeroCard(onPickFilesClick: () -> Unit) {
                     Icon(
                         imageVector = Icons.Rounded.FolderOpen,
                         contentDescription = null,
-                        tint = SecundaSilver,
+                        tint = EmberFlame,
                         modifier = Modifier.size(24.dp)
                     )
                 }
             }
-            Column(modifier = Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(3.dp)) {
-                Text(
-                    text = "Local & RAW Media Studio",
-                    style = MaterialTheme.typography.titleMedium,
-                    color = CrispWhite,
-                    fontWeight = FontWeight.SemiBold
-                )
+            Column(modifier = Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(4.dp)) {
+                Row(
+                    verticalAlignment = Alignment.CenterVertically,
+                    horizontalArrangement = Arrangement.spacedBy(8.dp)
+                ) {
+                    Text(
+                        text = "Local & RAW Studio",
+                        style = MaterialTheme.typography.titleMedium,
+                        color = CrispWhite,
+                        fontWeight = FontWeight.SemiBold
+                    )
+                    DomainRolePill(domain = EngineDomain.FORGE, label = "Local Forge")
+                }
                 Text(
                     text = "Convert, compress to target MB (AV1/HEVC/Opus), trim & snap-crop photos, RAW, audio, or video",
                     style = MaterialTheme.typography.bodySmall,
@@ -689,7 +738,7 @@ private fun LocalStudioHeroCard(onPickFilesClick: () -> Unit) {
             Icon(
                 imageVector = Icons.Rounded.Tune,
                 contentDescription = "Open Studio",
-                tint = MasserCrimson
+                tint = EmberFlame
             )
         }
     }
@@ -719,6 +768,8 @@ private fun QuickPresetPill(label: String, onClick: () -> Unit) {
 private fun ResolvedLinkChipCard(
     chip: ResolvedLinkChipItem,
     defaultTargetMb: Int,
+    defaultVideoCrf: Int,
+    deviceCapabilities: DeviceCapabilityReport,
     onToggleExpand: () -> Unit,
     onRetryResolve: () -> Unit,
     onRemove: () -> Unit,
@@ -737,22 +788,20 @@ private fun ResolvedLinkChipCard(
         DetectedLinkKind.AUDIO -> Color(0xFF4FD1C5)
         DetectedLinkKind.PLAYLIST -> AmberActive
         DetectedLinkKind.IMAGE -> EmeraldSuccess
-        DetectedLinkKind.VIDEO -> MasserCrimson
+        DetectedLinkKind.VIDEO -> ArcRelayCyan
     }
 
-    Card(
-        colors = CardDefaults.cardColors(containerColor = SlateSurface),
-        border = BorderStroke(
-            1.dp,
-            when {
-                chip.isExpanded -> MasserCrimson.copy(alpha = 0.7f)
-                chip.resolveState == LinkResolveState.FAILED -> CoralError.copy(alpha = 0.5f)
-                else -> SlateOutline
-            }
-        ),
-        shape = RoundedCornerShape(16.dp)
+    val chipEstimate = remember(chip, defaultVideoCrf) {
+        FilesizeEstimator.estimateLinkChip(chip, defaultVideoCrf)
+    }
+
+    WorkshopDomainCard(
+        domain = EngineDomain.RELAY,
+        isActive = chip.resolveState == LinkResolveState.RESOLVING,
+        shape = RoundedCornerShape(16.dp),
+        contentPadding = PaddingValues(12.dp)
     ) {
-        Column(modifier = Modifier.padding(12.dp), verticalArrangement = Arrangement.spacedBy(10.dp)) {
+        Column(verticalArrangement = Arrangement.spacedBy(10.dp)) {
             // Top Resolved Chip Header Row
             Row(
                 modifier = Modifier
@@ -780,7 +829,7 @@ private fun ResolvedLinkChipCard(
                             Icon(
                                 imageVector = when (chip.detectedKind) {
                                     DetectedLinkKind.AUDIO -> Icons.Rounded.MusicNote
-                                    DetectedLinkKind.PLAYLIST -> Icons.Rounded.QueueMusic
+                                    DetectedLinkKind.PLAYLIST -> Icons.AutoMirrored.Rounded.QueueMusic
                                     DetectedLinkKind.IMAGE -> Icons.Rounded.Image
                                     DetectedLinkKind.VIDEO -> Icons.Rounded.Videocam
                                 },
@@ -816,8 +865,18 @@ private fun ResolvedLinkChipCard(
                         chip.settings.scopeBadge?.let { scope ->
                             BadgePill(
                                 text = scope,
-                                bg = MasserCrimson.copy(alpha = 0.15f),
-                                fg = MasserCrimson
+                                bg = ArcRelayCyan.copy(alpha = 0.16f),
+                                fg = ArcRelayCyan
+                            )
+                        }
+                        if (chipEstimate != null) {
+                            LiveSizeEstimateBadge(
+                                estimate = chipEstimate,
+                                domain = if ((chip.settings.targetSizeMb ?: 0.0) > 0.0) {
+                                    EngineDomain.FORGE
+                                } else {
+                                    EngineDomain.RELAY
+                                }
                             )
                         }
                     }
@@ -991,6 +1050,9 @@ private fun ResolvedLinkChipCard(
                                         verticalArrangement = Arrangement.spacedBy(4.dp)
                                     ) {
                                         chip.tracks.forEach { track ->
+                                            val trackEstimate = remember(chip, track) {
+                                                FilesizeEstimator.estimatePlaylistTrack(chip, track)
+                                            }
                                             Row(
                                                 modifier = Modifier
                                                     .fillMaxWidth()
@@ -1005,7 +1067,7 @@ private fun ResolvedLinkChipCard(
                                                     checked = track.selected,
                                                     onCheckedChange = { onTogglePlaylistTrack(track.index) },
                                                     colors = CheckboxDefaults.colors(
-                                                        checkedColor = MasserCrimson,
+                                                        checkedColor = ArcRelayCyan,
                                                         uncheckedColor = MutedSteel
                                                     ),
                                                     modifier = Modifier.size(28.dp)
@@ -1035,6 +1097,13 @@ private fun ResolvedLinkChipCard(
                                                         )
                                                     }
                                                 }
+                                                if (trackEstimate != null) {
+                                                    BadgePill(
+                                                        text = trackEstimate.formattedEstimate(),
+                                                        bg = RelayCard,
+                                                        fg = ArcRelayCyan
+                                                    )
+                                                }
                                             }
                                         }
                                     }
@@ -1047,6 +1116,53 @@ private fun ResolvedLinkChipCard(
                                         style = MaterialTheme.typography.labelSmall,
                                         color = MutedSteel
                                     )
+                                }
+                            }
+                        }
+                    }
+
+                    // A2. Detected Chapters Live Size Preview (when available)
+                    if (chip.chapters.isNotEmpty()) {
+                        Surface(
+                            color = SlateCard,
+                            shape = RoundedCornerShape(12.dp),
+                            border = BorderStroke(1.dp, RelayBevelOutline)
+                        ) {
+                            Column(
+                                modifier = Modifier.padding(10.dp),
+                                verticalArrangement = Arrangement.spacedBy(6.dp)
+                            ) {
+                                Text(
+                                    text = "Chapters (${chip.chapters.size})",
+                                    style = MaterialTheme.typography.labelMedium,
+                                    color = SecundaSilver
+                                )
+                                chip.chapters.take(6).forEach { chapter ->
+                                    val chEstimate = remember(chip, chapter) {
+                                        FilesizeEstimator.estimateChapterTrack(chip, chapter)
+                                    }
+                                    Row(
+                                        modifier = Modifier.fillMaxWidth(),
+                                        verticalAlignment = Alignment.CenterVertically,
+                                        horizontalArrangement = Arrangement.SpaceBetween
+                                    ) {
+                                        Text(
+                                            text = "${chapter.index}. ${chapter.title} (${chapter.formattedRange()})",
+                                            style = MaterialTheme.typography.labelSmall,
+                                            color = CrispWhite,
+                                            maxLines = 1,
+                                            overflow = TextOverflow.Ellipsis,
+                                            modifier = Modifier.weight(1f)
+                                        )
+                                        if (chEstimate != null) {
+                                            Spacer(Modifier.width(6.dp))
+                                            BadgePill(
+                                                text = chEstimate.formattedEstimate(),
+                                                bg = RelayCard,
+                                                fg = ArcRelayCyan
+                                            )
+                                        }
+                                    }
                                 }
                             }
                         }
@@ -1092,7 +1208,10 @@ private fun ResolvedLinkChipCard(
                             }
                         }
 
-                        FlowRow(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                        Row(
+                            verticalAlignment = Alignment.CenterVertically,
+                            horizontalArrangement = Arrangement.spacedBy(8.dp)
+                        ) {
                             FilterChip(
                                 selected = chip.settings.embedMetadata,
                                 onClick = { onUpdateSettings { it.copy(embedMetadata = !it.embedMetadata) } },
@@ -1103,14 +1222,18 @@ private fun ResolvedLinkChipCard(
                                 onClick = { onUpdateSettings { it.copy(sponsorBlock = !it.sponsorBlock) } },
                                 label = { Text("SponsorBlock") }
                             )
+                            ForgeInfoTipButton(
+                                topic = SettingTopic.SPONSOR_BLOCK,
+                                capabilityReport = deviceCapabilities
+                            )
                         }
                     }
 
-                    // C. Perceptual Target Filesize Engine
+                    // C. Perceptual Target Filesize Engine (Molten Forge Post-Download Stage)
                     Surface(
-                        color = SlateCard,
+                        color = FurnaceCard,
                         shape = RoundedCornerShape(12.dp),
-                        border = BorderStroke(1.dp, SlateOutline)
+                        border = BorderStroke(1.dp, ForgeBevelOutline)
                     ) {
                         var customMbText by remember(chip.cleanUrl, chip.settings.targetSizeMb) {
                             mutableStateOf(
@@ -1129,16 +1252,29 @@ private fun ResolvedLinkChipCard(
                                 horizontalArrangement = Arrangement.SpaceBetween,
                                 verticalAlignment = Alignment.CenterVertically
                             ) {
-                                Text(
-                                    text = "Target Filesize (Post-Download Forge)",
-                                    style = MaterialTheme.typography.labelMedium,
-                                    color = CrispWhite
-                                )
-                                if (chip.settings.targetSizeMb != null) {
+                                Row(
+                                    modifier = Modifier.weight(1f),
+                                    verticalAlignment = Alignment.CenterVertically,
+                                    horizontalArrangement = Arrangement.spacedBy(6.dp)
+                                ) {
+                                    DomainRolePill(domain = EngineDomain.FORGE, label = "Forge Cap")
                                     Text(
-                                        text = "Active",
-                                        style = MaterialTheme.typography.labelSmall,
-                                        color = EmeraldSuccess
+                                        text = "Target Filesize",
+                                        style = MaterialTheme.typography.labelMedium,
+                                        color = CrispWhite
+                                    )
+                                }
+                                Row(verticalAlignment = Alignment.CenterVertically) {
+                                    if (chip.settings.targetSizeMb != null) {
+                                        Text(
+                                            text = "Active",
+                                            style = MaterialTheme.typography.labelSmall,
+                                            color = EmeraldSuccess
+                                        )
+                                    }
+                                    ForgeInfoTipButton(
+                                        topic = SettingTopic.TARGET_FILESIZE,
+                                        capabilityReport = deviceCapabilities
                                     )
                                 }
                             }
@@ -1198,11 +1334,26 @@ private fun ResolvedLinkChipCard(
                             if (activeTargetMb != null && activeTargetMb > 0.0 &&
                                 chip.settings.mode != DownloadMode.AUDIO_ONLY
                             ) {
-                                Text(
-                                    text = "Perceptual Compression Engine",
-                                    style = MaterialTheme.typography.labelSmall,
-                                    color = SecundaSilver
-                                )
+                                Row(
+                                    modifier = Modifier.fillMaxWidth(),
+                                    horizontalArrangement = Arrangement.SpaceBetween,
+                                    verticalAlignment = Alignment.CenterVertically
+                                ) {
+                                    Text(
+                                        text = "Perceptual Compression Engine",
+                                        style = MaterialTheme.typography.labelSmall,
+                                        color = SecundaSilver,
+                                        modifier = Modifier.weight(1f)
+                                    )
+                                    ForgeInfoTipButton(
+                                        topic = SettingTopic.TWO_PASS_ENCODING,
+                                        capabilityReport = deviceCapabilities
+                                    )
+                                    ForgeInfoTipButton(
+                                        topic = SettingTopic.VIDEO_CODEC,
+                                        capabilityReport = deviceCapabilities
+                                    )
+                                }
                                 FlowRow(
                                     horizontalArrangement = Arrangement.spacedBy(6.dp),
                                     verticalArrangement = Arrangement.spacedBy(6.dp)

@@ -14,7 +14,9 @@ import com.fissal.forge.ForgeApplication
 import com.fissal.forge.data.local.ForgeJobEntity
 import com.fissal.forge.data.settings.ForgeSettings
 import com.fissal.forge.domain.logic.AspectRatioSnapper
+import com.fissal.forge.domain.logic.DeviceCapabilityReport
 import com.fissal.forge.domain.logic.ParsedUrlItem
+import com.fissal.forge.domain.logic.SampleCalibrationRatio
 import com.fissal.forge.domain.logic.UrlBatchParser
 import com.fissal.forge.domain.logic.YtDlpJsonParser
 import com.fissal.forge.domain.model.AspectPreset
@@ -35,14 +37,19 @@ import com.fissal.forge.domain.model.MediaProbeResult
 import com.fissal.forge.domain.model.PipelineSpec
 import com.fissal.forge.domain.model.ResolvedLinkChipItem
 import com.fissal.forge.domain.model.ResolvedUrlMetadata
+import com.fissal.forge.domain.model.SilenceSkipSpec
 import com.fissal.forge.domain.model.TrimSpec
 import com.fissal.forge.domain.model.VideoCodecChoice
 import com.fissal.forge.pipeline.OrchestratorMetrics
 import com.fissal.forge.update.AppUpdateManager
 import com.fissal.forge.update.AppUpdateState
 import kotlinx.coroutines.CancellationException
+import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
+import kotlinx.coroutines.SupervisorJob
+import kotlinx.coroutines.cancelAndJoin
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.SharingStarted
 import kotlinx.coroutines.flow.StateFlow
@@ -51,7 +58,9 @@ import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.flow.stateIn
 import kotlinx.coroutines.flow.update
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.Semaphore
+import kotlinx.coroutines.sync.withLock
 import kotlinx.coroutines.sync.withPermit
 import kotlinx.coroutines.withContext
 import java.io.File
@@ -90,6 +99,7 @@ data class StudioItemConfig(
     val fastKeyframeCopy: Boolean = false,
     val fadeInOut: Boolean = false,
     val muteAudio: Boolean = false,
+    val silenceSkipEnabled: Boolean = false,
     val cropEnabled: Boolean = false,
     val cropPreset: AspectPreset = AspectPreset.AUTO_CLOSEST,
     val cropRect: CropRectNormalized = CropRectNormalized(),
@@ -104,7 +114,12 @@ data class StudioSessionState(
     val isLoadingPreview: Boolean = true,
     val cameFromShareIntent: Boolean = false,
     val activeTab: StudioToolTab = StudioToolTab.CONVERT,
-    val inlineWatchJobIds: List<String> = emptyList()
+    val inlineWatchJobIds: List<String> = emptyList(),
+    val originalSampleBitmap: Bitmap? = null,
+    val compressedSampleBitmap: Bitmap? = null,
+    val isGeneratingSample: Boolean = false,
+    val showCompressedSample: Boolean = false,
+    val sampleCalibration: SampleCalibrationRatio? = null
 ) {
     val primaryItem: MediaProbeResult
         get() = items.getOrElse(selectedItemIndex) { items.first() }
@@ -134,6 +149,7 @@ data class StudioSessionState(
     val fastKeyframeCopy: Boolean get() = activeConfig.fastKeyframeCopy
     val fadeInOut: Boolean get() = activeConfig.fadeInOut
     val muteAudio: Boolean get() = activeConfig.muteAudio
+    val silenceSkipEnabled: Boolean get() = activeConfig.silenceSkipEnabled
     val cropEnabled: Boolean get() = activeConfig.cropEnabled
     val cropPreset: AspectPreset get() = activeConfig.cropPreset
     val cropRect: CropRectNormalized get() = activeConfig.cropRect
@@ -154,9 +170,12 @@ class ForgeViewModel(application: Application) : AndroidViewModel(application) {
     private val settingsRepo = app.settingsRepository
     private val probeEngine = app.probeEngine
     private val imageRawEngine = app.imageRawEngine
+    private val ffmpegEngine = app.ffmpegEngine
     private val ytDlpEngine = app.ytDlpEngine
     private val binaryManager = app.binaryManager
     private val appUpdateManager = app.appUpdateManager
+
+    val deviceCapabilities: DeviceCapabilityReport = app.deviceCapabilities
 
     val settings: StateFlow<ForgeSettings> = settingsRepo.settingsFlow
         .stateIn(viewModelScope, SharingStarted.Eagerly, ForgeSettings())
@@ -168,7 +187,19 @@ class ForgeViewModel(application: Application) : AndroidViewModel(application) {
 
     val appUpdateState: StateFlow<AppUpdateState> = appUpdateManager.state
 
+    private var samplePreviewJob: Job? = null
+    private val sampleVideoMutex = Mutex()
+    private val samplePreviewDir: File
+        get() = File(app.cacheDir, "sample_preview")
+    private var cachedSampleVideoUri: String? = null
+    private var cachedSampleVideoFile: File? = null
+
     init {
+        viewModelScope.launch(Dispatchers.IO) {
+            sampleVideoMutex.withLock {
+                runCatching { samplePreviewDir.deleteRecursively() }
+            }
+        }
         viewModelScope.launch {
             val initial = settingsRepo.settingsFlow.first()
             if (initial.autoCheckAppUpdates) {
@@ -177,6 +208,18 @@ class ForgeViewModel(application: Application) : AndroidViewModel(application) {
                     userInitiated = false
                 )
             }
+        }
+    }
+
+    override fun onCleared() {
+        super.onCleared()
+        samplePreviewJob?.cancel()
+        samplePreviewJob = null
+        cachedSampleVideoUri = null
+        cachedSampleVideoFile = null
+        val dir = samplePreviewDir
+        CoroutineScope(SupervisorJob() + Dispatchers.IO).launch {
+            runCatching { dir.deleteRecursively() }
         }
     }
 
@@ -349,6 +392,7 @@ class ForgeViewModel(application: Application) : AndroidViewModel(application) {
             durationSec = meta.durationSec,
             approxBytes = meta.approxBytes,
             tracks = meta.tracks,
+            chapters = meta.chapters,
             settings = LinkItemSettings(
                 mode = smartMode,
                 maxHeight = curSettings.defaultMaxVideoHeight.takeIf { it > 0 },
@@ -388,6 +432,7 @@ class ForgeViewModel(application: Application) : AndroidViewModel(application) {
             durationSec = meta.durationSec,
             approxBytes = meta.approxBytes,
             tracks = meta.tracks,
+            chapters = meta.chapters,
             settings = updatedSettings,
             isExpanded = chip.isExpanded || (!chip.userCustomized && meta.tracks.size > 1),
             errorHint = null
@@ -656,12 +701,7 @@ class ForgeViewModel(application: Application) : AndroidViewModel(application) {
             val preview = imageRawEngine.loadEditorPreviewBitmap(Uri.parse(target.uriString), target)
             _studioSession.update { latest ->
                 if (latest == null || latest.selectedItemIndex != index) {
-                    preview?.let { if (!it.isRecycled) it.recycle() }
                     return@update latest
-                }
-                val oldPreview = latest.previewBitmap
-                if (oldPreview != null && oldPreview !== preview && !oldPreview.isRecycled) {
-                    oldPreview.recycle()
                 }
                 val updatedItems = latest.items.toMutableList()
                 val updatedConfigs = latest.itemConfigs.toMutableList()
@@ -682,13 +722,33 @@ class ForgeViewModel(application: Application) : AndroidViewModel(application) {
                     isLoadingPreview = false
                 )
             }
+            val current = _studioSession.value
+            if (current != null &&
+                current.selectedItemIndex == index &&
+                current.activeTab == StudioToolTab.COMPRESS &&
+                current.primaryItem.isVisual
+            ) {
+                scheduleInlineSampleGeneration()
+            }
         }
     }
 
     fun selectStudioItem(index: Int) {
         val cur = _studioSession.value ?: return
         if (index !in cur.items.indices || index == cur.selectedItemIndex) return
-        _studioSession.update { it?.copy(selectedItemIndex = index) }
+        samplePreviewJob?.cancel()
+        _studioSession.update {
+            it?.copy(
+                selectedItemIndex = index,
+                previewBitmap = null,
+                isLoadingPreview = true,
+                originalSampleBitmap = null,
+                compressedSampleBitmap = null,
+                isGeneratingSample = false,
+                showCompressedSample = false,
+                sampleCalibration = null
+            )
+        }
         loadPreviewForSelectedItem(index)
     }
 
@@ -733,28 +793,86 @@ class ForgeViewModel(application: Application) : AndroidViewModel(application) {
     }
 
     fun closeStudioSession() {
-        _studioSession.update { state ->
-            state?.previewBitmap?.let { if (!it.isRecycled) it.recycle() }
-            null
+        val activeSampleJob = samplePreviewJob
+        samplePreviewJob = null
+        activeSampleJob?.cancel()
+        viewModelScope.launch(Dispatchers.IO) {
+            runCatching { activeSampleJob?.cancelAndJoin() }
+            sampleVideoMutex.withLock {
+                cachedSampleVideoUri = null
+                cachedSampleVideoFile = null
+                runCatching { samplePreviewDir.deleteRecursively() }
+            }
         }
+        _studioSession.update { null }
     }
 
     fun updateStudio(transform: (StudioItemConfig) -> StudioItemConfig) {
+        var shouldRegenerateSample = false
         _studioSession.update { state ->
-            state?.updateActiveConfig(transform)
+            if (state == null) {
+                null
+            } else {
+                val before = state.activeConfig
+                val nextState = state.updateActiveConfig(transform)
+                val after = nextState.activeConfig
+                val sampleInputsChanged = before.sampleSignature() != after.sampleSignature()
+                shouldRegenerateSample = sampleInputsChanged &&
+                    nextState.activeTab == StudioToolTab.COMPRESS &&
+                    nextState.primaryItem.isVisual
+                if (sampleInputsChanged) {
+                    if (nextState.activeTab == StudioToolTab.COMPRESS) {
+                        nextState.copy(sampleCalibration = null)
+                    } else {
+                        nextState.copy(
+                            originalSampleBitmap = null,
+                            compressedSampleBitmap = null,
+                            showCompressedSample = false,
+                            sampleCalibration = null
+                        )
+                    }
+                } else {
+                    nextState
+                }
+            }
+        }
+        if (shouldRegenerateSample) {
+            scheduleInlineSampleGeneration()
         }
     }
 
     fun updateStudioTab(tab: StudioToolTab) {
+        var shouldRegenerateSample = false
         _studioSession.update { state ->
-            if (state == null) null
-            else state.copy(activeTab = tab).updateActiveConfig { cfg ->
-                when (tab) {
-                    StudioToolTab.CONVERT -> cfg.copy(convertEnabled = true)
-                    StudioToolTab.COMPRESS -> cfg.copy(compressEnabled = true)
-                    StudioToolTab.TRIM -> cfg.copy(trimEnabled = true)
-                    StudioToolTab.CROP -> cfg.copy(cropEnabled = true)
+            if (state == null) {
+                null
+            } else {
+                val next = state.copy(activeTab = tab).updateActiveConfig { cfg ->
+                    when (tab) {
+                        StudioToolTab.CONVERT -> cfg.copy(convertEnabled = true)
+                        StudioToolTab.COMPRESS -> cfg.copy(compressEnabled = true)
+                        StudioToolTab.TRIM -> cfg.copy(trimEnabled = true)
+                        StudioToolTab.CROP -> cfg.copy(cropEnabled = true)
+                    }
                 }
+                shouldRegenerateSample = tab == StudioToolTab.COMPRESS &&
+                    next.primaryItem.isVisual &&
+                    (next.compressedSampleBitmap == null || next.sampleCalibration == null)
+                next
+            }
+        }
+        if (shouldRegenerateSample) {
+            scheduleInlineSampleGeneration()
+        }
+    }
+
+    fun toggleSamplePreviewComparison() {
+        _studioSession.update { state ->
+            val comp = state?.compressedSampleBitmap
+            if (state == null || comp == null || comp.isRecycled) {
+                state
+            } else {
+                state.copy(showCompressedSample = !state.showCompressedSample)
             }
         }
     }
@@ -764,6 +882,7 @@ class ForgeViewModel(application: Application) : AndroidViewModel(application) {
     }
 
     fun selectStudioCropPreset(preset: AspectPreset) {
+        var shouldRegenerateSample = false
         _studioSession.update { state ->
             if (state == null) return@update null
             val p = state.primaryItem
@@ -772,101 +891,287 @@ class ForgeViewModel(application: Application) : AndroidViewModel(application) {
                 effectiveWidth = p.effectiveWidth,
                 effectiveHeight = p.effectiveHeight
             )
-            state.updateActiveConfig { cfg ->
+            val next = state.updateActiveConfig { cfg ->
                 cfg.copy(
                     cropEnabled = true,
                     cropPreset = resolvedPreset,
                     cropRect = resolvedRect
                 )
-            }
+            }.copy(
+                originalSampleBitmap = null,
+                compressedSampleBitmap = null,
+                showCompressedSample = false,
+                sampleCalibration = null
+            )
+            shouldRegenerateSample = next.activeTab == StudioToolTab.COMPRESS && p.isVisual
+            next
+        }
+        if (shouldRegenerateSample) {
+            scheduleInlineSampleGeneration()
         }
     }
 
+    fun buildPipelineSpecForStudioItem(
+        probe: MediaProbeResult,
+        cfg: StudioItemConfig,
+        saveToDevice: Boolean = true,
+        copyToClipboard: Boolean = false,
+        forceCompressSpec: Boolean = false
+    ): PipelineSpec {
+        val curSettings = settings.value
+        val stripMeta = cfg.stripMetadata || (!saveToDevice && copyToClipboard && curSettings.stripMetadataOnClipboard)
+        val includeCompress = cfg.compressEnabled || forceCompressSpec
+
+        val convertSpec = if (cfg.convertEnabled || probe.mediaKind == MediaKind.CAMERA_RAW ||
+            (includeCompress && cfg.compressMode == CompressMode.TARGET_BYTES && probe.mediaKind == MediaKind.VIDEO)
+        ) {
+            val chosenVideo = when {
+                cfg.convertEnabled -> cfg.videoCodec
+                includeCompress && cfg.compressMode == CompressMode.TARGET_BYTES -> when (cfg.compressionTier) {
+                    CompressionTier.PERCEPTUAL_AV1 -> VideoCodecChoice.AV1
+                    CompressionTier.TWO_PASS_HEVC -> VideoCodecChoice.HEVC
+                    CompressionTier.COMPATIBLE_H264 -> VideoCodecChoice.H264
+                }
+                else -> cfg.videoCodec
+            }
+            val chosenAudio = when {
+                cfg.muteAudio -> AudioCodecChoice.MUTE
+                cfg.convertEnabled -> cfg.audioCodec
+                includeCompress && cfg.compressMode == CompressMode.TARGET_BYTES &&
+                    cfg.compressionTier == CompressionTier.PERCEPTUAL_AV1 -> AudioCodecChoice.OPUS
+                else -> cfg.audioCodec
+            }
+            ConvertSpec(
+                targetExtension = cfg.targetExtension,
+                videoCodec = chosenVideo,
+                audioCodec = chosenAudio
+            )
+        } else {
+            null
+        }
+
+        val targetBytes = cfg.targetMbText.toDoubleOrNull()?.let { mb ->
+            if (mb > 0.0) (mb * 1024.0 * 1024.0).roundToLong() else null
+        }
+
+        val compressSpec = if (includeCompress) {
+            CompressSpec(
+                mode = cfg.compressMode,
+                videoCrf = cfg.videoCrf,
+                imageQuality = cfg.imageQuality,
+                targetBytes = if (cfg.compressMode == CompressMode.TARGET_BYTES) targetBytes else null,
+                maxDimensionPx = cfg.maxDimensionPx,
+                rawHalfSizeFast = cfg.rawHalfSizeFast,
+                tier = cfg.compressionTier,
+                twoPass = true
+            )
+        } else {
+            null
+        }
+
+        val silenceSkipSpec = if (cfg.silenceSkipEnabled && probe.isTimeBased) {
+            SilenceSkipSpec(enabled = true)
+        } else {
+            null
+        }
+
+        val trimSpec = if (cfg.trimEnabled && probe.isTimeBased) {
+            TrimSpec(
+                startMs = cfg.trimStartMs,
+                endMs = cfg.trimEndMs.takeIf { it > cfg.trimStartMs && it < probe.durationMs }
+                    ?: if (cfg.trimEndMs > cfg.trimStartMs) cfg.trimEndMs else null,
+                fastKeyframeCopy = cfg.fastKeyframeCopy,
+                fadeInOut = cfg.fadeInOut,
+                muteAudio = cfg.muteAudio,
+                silenceSkip = silenceSkipSpec
+            )
+        } else {
+            null
+        }
+
+        val cropSpec = if (cfg.cropEnabled && probe.isVisual) {
+            CropSpec(preset = cfg.cropPreset, rect = cfg.cropRect)
+        } else {
+            null
+        }
+
+        return PipelineSpec(
+            convert = convertSpec,
+            compress = compressSpec,
+            trim = trimSpec,
+            crop = cropSpec,
+            delivery = DeliverySpec(
+                saveToDevice = saveToDevice,
+                copyToClipboard = copyToClipboard,
+                stripMetadata = stripMeta,
+                filenameSuffix = curSettings.filenameSuffix
+            ),
+            silenceSkip = silenceSkipSpec
+        )
+    }
+
+    private fun scheduleInlineSampleGeneration() {
+        samplePreviewJob?.cancel()
+        val state = _studioSession.value ?: return
+        val item = state.primaryItem
+        if (!item.isVisual || state.activeTab != StudioToolTab.COMPRESS) return
+
+        val itemIdx = state.selectedItemIndex
+        val cfg = state.activeConfig
+        if (item.mediaKind != MediaKind.VIDEO && (state.previewBitmap == null || state.previewBitmap.isRecycled)) {
+            return
+        }
+
+        val spec = buildPipelineSpecForStudioItem(
+            probe = item,
+            cfg = cfg,
+            forceCompressSpec = true
+        )
+
+        _studioSession.update { cur ->
+            if (cur != null && cur.selectedItemIndex == itemIdx) {
+                cur.copy(isGeneratingSample = true)
+            } else {
+                cur
+            }
+        }
+
+        lateinit var launchedJob: Job
+        launchedJob = viewModelScope.launch {
+            try {
+                delay(350L)
+                val currentState = _studioSession.value ?: return@launch
+                if (currentState.selectedItemIndex != itemIdx) return@launch
+
+                when (item.mediaKind) {
+                    MediaKind.IMAGE, MediaKind.CAMERA_RAW -> {
+                        val previewBmp = currentState.previewBitmap ?: return@launch
+                        if (previewBmp.isRecycled) return@launch
+                        val res = imageRawEngine.generateImageSamplePreview(previewBmp, item, spec)
+                        _studioSession.update { latest ->
+                            if (latest != null && latest.selectedItemIndex == itemIdx) {
+                                latest.copy(
+                                    originalSampleBitmap = res.originalBitmap,
+                                    compressedSampleBitmap = res.compressedBitmap,
+                                    sampleCalibration = res.calibration,
+                                    isGeneratingSample = false
+                                )
+                            } else {
+                                latest
+                            }
+                        }
+                    }
+                    MediaKind.VIDEO -> {
+                        val workDir = samplePreviewDir.apply { if (!exists()) mkdirs() }
+                        val videoFile = withContext(Dispatchers.IO) {
+                            resolveOrStageSampleVideo(item.uriString)
+                        }
+                        val startMs = if (cfg.trimEnabled) cfg.trimStartMs.coerceAtLeast(0L) else 0L
+                        val endMs = if (cfg.trimEnabled && cfg.trimEndMs > startMs) {
+                            cfg.trimEndMs
+                        } else {
+                            item.durationMs.coerceAtLeast(startMs)
+                        }
+                        val midpointMs = if (endMs > startMs) (startMs + endMs) / 2L else 0L
+                        val res = ffmpegEngine.generateVideoSampleFrame(
+                            inputFile = videoFile,
+                            probe = item,
+                            spec = spec,
+                            timestampMs = midpointMs,
+                            workDir = workDir
+                        )
+                        _studioSession.update { latest ->
+                            if (latest != null && latest.selectedItemIndex == itemIdx) {
+                                latest.copy(
+                                    originalSampleBitmap = res.originalBitmap,
+                                    compressedSampleBitmap = res.compressedBitmap,
+                                    sampleCalibration = res.calibration,
+                                    isGeneratingSample = false
+                                )
+                            } else {
+                                latest
+                            }
+                        }
+                    }
+                    else -> {
+                        _studioSession.update { latest ->
+                            if (latest != null && latest.selectedItemIndex == itemIdx) {
+                                latest.copy(isGeneratingSample = false)
+                            } else {
+                                latest
+                            }
+                        }
+                    }
+                }
+            } catch (ce: CancellationException) {
+                throw ce
+            } catch (_: Throwable) {
+                _studioSession.update { latest ->
+                    if (latest != null && samplePreviewJob === launchedJob) {
+                        latest.copy(isGeneratingSample = false)
+                    } else {
+                        latest
+                    }
+                }
+            }
+        }
+        samplePreviewJob = launchedJob
+    }
+
+    private suspend fun resolveOrStageSampleVideo(uriString: String): File = sampleVideoMutex.withLock {
+        val dir = samplePreviewDir.apply { if (!exists()) mkdirs() }
+        val existing = cachedSampleVideoFile
+        if (cachedSampleVideoUri == uriString && existing != null && existing.exists() && existing.canRead()) {
+            return@withLock existing
+        }
+        val previous = existing
+        val parsedUri = Uri.parse(uriString)
+        val staged = if (parsedUri.scheme == "file" && parsedUri.path != null) {
+            File(parsedUri.path!!)
+        } else {
+            probeEngine.stageUriToTempFile(parsedUri, dir, "sample_src")
+        }
+        if (previous != null && previous.absolutePath != staged.absolutePath &&
+            previous.parentFile?.absolutePath == dir.absolutePath
+        ) {
+            runCatching { previous.delete() }
+        }
+        cachedSampleVideoUri = uriString
+        cachedSampleVideoFile = staged
+        staged
+    }
+
+    private fun StudioItemConfig.sampleSignature(): List<Any?> = listOf(
+        convertEnabled,
+        targetExtension,
+        videoCodec,
+        audioCodec,
+        compressMode,
+        compressionTier,
+        videoCrf,
+        imageQuality,
+        targetMbText,
+        maxDimensionPx,
+        rawHalfSizeFast,
+        trimEnabled,
+        trimStartMs,
+        trimEndMs,
+        muteAudio,
+        cropEnabled,
+        cropPreset,
+        cropRect
+    )
+
     fun enqueueStudioSession(saveToDevice: Boolean, copyToClipboard: Boolean) {
         val state = _studioSession.value ?: return
-        val curSettings = settings.value
 
         val batchPairs = state.items.mapIndexed { idx, probe ->
             val cfg = state.itemConfigs[idx]
-            val stripMeta = cfg.stripMetadata || (!saveToDevice && copyToClipboard && curSettings.stripMetadataOnClipboard)
-
-            val convertSpec = if (cfg.convertEnabled || probe.mediaKind == MediaKind.CAMERA_RAW ||
-                (cfg.compressEnabled && cfg.compressMode == CompressMode.TARGET_BYTES && probe.mediaKind == MediaKind.VIDEO)
-            ) {
-                val chosenVideo = when {
-                    cfg.convertEnabled -> cfg.videoCodec
-                    cfg.compressEnabled && cfg.compressMode == CompressMode.TARGET_BYTES -> when (cfg.compressionTier) {
-                        CompressionTier.PERCEPTUAL_AV1 -> VideoCodecChoice.AV1
-                        CompressionTier.TWO_PASS_HEVC -> VideoCodecChoice.HEVC
-                        CompressionTier.COMPATIBLE_H264 -> VideoCodecChoice.H264
-                    }
-                    else -> cfg.videoCodec
-                }
-                val chosenAudio = when {
-                    cfg.muteAudio -> AudioCodecChoice.MUTE
-                    cfg.convertEnabled -> cfg.audioCodec
-                    cfg.compressEnabled && cfg.compressMode == CompressMode.TARGET_BYTES &&
-                        cfg.compressionTier == CompressionTier.PERCEPTUAL_AV1 -> AudioCodecChoice.OPUS
-                    else -> cfg.audioCodec
-                }
-                ConvertSpec(
-                    targetExtension = cfg.targetExtension,
-                    videoCodec = chosenVideo,
-                    audioCodec = chosenAudio
-                )
-            } else {
-                null
-            }
-
-            val targetBytes = cfg.targetMbText.toDoubleOrNull()?.let { mb ->
-                if (mb > 0.0) (mb * 1024.0 * 1024.0).roundToLong() else null
-            }
-
-            val compressSpec = if (cfg.compressEnabled) {
-                CompressSpec(
-                    mode = cfg.compressMode,
-                    videoCrf = cfg.videoCrf,
-                    imageQuality = cfg.imageQuality,
-                    targetBytes = if (cfg.compressMode == CompressMode.TARGET_BYTES) targetBytes else null,
-                    maxDimensionPx = cfg.maxDimensionPx,
-                    rawHalfSizeFast = cfg.rawHalfSizeFast,
-                    tier = cfg.compressionTier,
-                    twoPass = true
-                )
-            } else {
-                null
-            }
-
-            val trimSpec = if (cfg.trimEnabled && probe.isTimeBased) {
-                TrimSpec(
-                    startMs = cfg.trimStartMs,
-                    endMs = cfg.trimEndMs.takeIf { it > cfg.trimStartMs && it < probe.durationMs }
-                        ?: if (cfg.trimEndMs > cfg.trimStartMs) cfg.trimEndMs else null,
-                    fastKeyframeCopy = cfg.fastKeyframeCopy,
-                    fadeInOut = cfg.fadeInOut,
-                    muteAudio = cfg.muteAudio
-                )
-            } else {
-                null
-            }
-
-            val cropSpec = if (cfg.cropEnabled && probe.isVisual) {
-                CropSpec(preset = cfg.cropPreset, rect = cfg.cropRect)
-            } else {
-                null
-            }
-
-            probe to PipelineSpec(
-                convert = convertSpec,
-                compress = compressSpec,
-                trim = trimSpec,
-                crop = cropSpec,
-                delivery = DeliverySpec(
-                    saveToDevice = saveToDevice,
-                    copyToClipboard = copyToClipboard,
-                    stripMetadata = stripMeta,
-                    filenameSuffix = curSettings.filenameSuffix
-                )
+            probe to buildPipelineSpecForStudioItem(
+                probe = probe,
+                cfg = cfg,
+                saveToDevice = saveToDevice,
+                copyToClipboard = copyToClipboard
             )
         }
 

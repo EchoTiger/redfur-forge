@@ -5,6 +5,8 @@ import com.fissal.forge.data.local.ForgeDatabase
 import com.fissal.forge.data.settings.ForgeSettingsRepository
 import com.fissal.forge.delivery.ClipboardExportManager
 import com.fissal.forge.delivery.MediaStoreExporter
+import com.fissal.forge.domain.logic.DeviceCapabilityAdvisor
+import com.fissal.forge.domain.logic.DeviceCapabilityReport
 import com.fissal.forge.engine.FFmpegCliEngine
 import com.fissal.forge.engine.ImageRawEngine
 import com.fissal.forge.engine.MediaProbeEngine
@@ -41,6 +43,8 @@ class ForgeApplication : Application() {
         private set
     lateinit var appUpdateManager: AppUpdateManager
         private set
+    lateinit var deviceCapabilities: DeviceCapabilityReport
+        private set
     lateinit var orchestrator: PipelineOrchestrator
         private set
 
@@ -56,6 +60,7 @@ class ForgeApplication : Application() {
         mediaStoreExporter = MediaStoreExporter(this)
         clipboardExportManager = ClipboardExportManager(this)
         appUpdateManager = AppUpdateManager(this)
+        deviceCapabilities = DeviceCapabilityAdvisor.profileDevice(this)
 
         orchestrator = PipelineOrchestrator(
             appContext = this,
@@ -66,7 +71,8 @@ class ForgeApplication : Application() {
             ffmpegEngine = ffmpegEngine,
             imageRawEngine = imageRawEngine,
             mediaStoreExporter = mediaStoreExporter,
-            clipboardExportManager = clipboardExportManager
+            clipboardExportManager = clipboardExportManager,
+            deviceCapabilities = deviceCapabilities
         )
 
         // Warm up yt-dlp/python/ffmpeg extraction asynchronously on IO without blocking cold start

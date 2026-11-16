@@ -1,19 +1,282 @@
 <?xml version="1.0" encoding="utf-8"?>
 <vector xmlns:android="http://schemas.android.com/apk/res/android"
+    xmlns:aapt="http://schemas.android.com/aapt"
     android:width="108dp"
     android:height="108dp"
     android:viewportWidth="108"
     android:viewportHeight="108">
+
+    <!-- All elements constrained inside the 66x66dp adaptive safe zone (x: 22..86, y: 22..86, r <= 32 from 54,54) -->
+
+    <!-- Soft molten furnace halo behind head -->
+    <path android:pathData="M54,23 A31,31 0 1,0 54,85 A31,31 0 1,0 54,23 Z">
+        <aapt:attr name="android:fillColor">
+            <gradient
+                android:centerX="54"
+                android:centerY="54"
+                android:gradientRadius="31"
+                android:type="radial">
+                <item
+                    android:color="#66FF5722"
+                    android:offset="0.0" />
+                <item
+                    android:color="#33E84A5F"
+                    android:offset="0.58" />
+                <item
+                    android:color="#000A0B0F"
+                    android:offset="1.0" />
+            </gradient>
+        </aapt:attr>
+    </path>
+
+    <!-- Lower brass clockwork gear collar framing chin & jaw -->
     <path
-        android:fillColor="#E84A5F"
-        android:pathData="M54,26L78,40v28L54,82L30,68V40z" />
+        android:pathData="M80.7,59.2 L83.9,61.2 L82.5,65.8 L78.7,65.5 L76.3,69.6 L78.4,72.7 L75.2,76.3 L71.8,74.5 L68.0,77.3 L68.7,81.1 L64.3,83.0 L62.0,80.0 L57.3,81.0 L56.4,84.7 L51.6,84.7 L50.7,81.0 L46.0,80.0 L43.7,83.0 L39.3,81.1 L40.0,77.3 L36.2,74.5 L32.8,76.3 L29.6,72.7 L31.7,69.6 L29.3,65.5 L25.5,65.8 L24.1,61.2 L27.3,59.2 L31.5,58.8 L33.2,63.7 L35.9,68.2 L39.5,71.9 L43.9,74.7 L48.8,76.4 L54.0,77.0 L59.2,76.4 L64.1,74.7 L68.5,71.9 L72.1,68.2 L74.8,63.7 L76.5,58.8 Z"
+        android:strokeWidth="0.9"
+        android:strokeColor="#6E411C"
+        android:strokeLineJoin="round">
+        <aapt:attr name="android:fillColor">
+            <gradient
+                android:endX="54"
+                android:endY="85"
+                android:startX="54"
+                android:startY="59"
+                android:type="linear">
+                <item
+                    android:color="#FFFFB347"
+                    android:offset="0.0" />
+                <item
+                    android:color="#FFC68346"
+                    android:offset="0.45" />
+                <item
+                    android:color="#FF8C5324"
+                    android:offset="1.0" />
+            </gradient>
+        </aapt:attr>
+    </path>
+
+    <!-- Primary Alfiq lynx-tufted cat head silhouette -->
     <path
-        android:fillColor="#0B0D12"
-        android:pathData="M54,36L69,45v18L54,72L39,63V45z" />
+        android:pathData="M54.0,36.8 L43.5,38.5 L36.5,28.0 L33.2,35.8 L35.8,37.5 L31.0,44.5 L26.2,50.5 L28.8,56.8 L32.6,58.2 L31.6,63.8 L40.8,72.4 L54.0,77.6 L67.2,72.4 L76.4,63.8 L75.4,58.2 L79.2,56.8 L81.8,50.5 L77.0,44.5 L72.2,37.5 L74.8,35.8 L71.5,28.0 L64.5,38.5 Z"
+        android:strokeWidth="1.35"
+        android:strokeColor="#FF8A3D"
+        android:strokeLineJoin="round">
+        <aapt:attr name="android:fillColor">
+            <gradient
+                android:endX="54"
+                android:endY="78"
+                android:startX="54"
+                android:startY="28"
+                android:type="linear">
+                <item
+                    android:color="#FF3A1A22"
+                    android:offset="0.0" />
+                <item
+                    android:color="#FF211419"
+                    android:offset="0.55" />
+                <item
+                    android:color="#FF150D12"
+                    android:offset="1.0" />
+            </gradient>
+        </aapt:attr>
+    </path>
+
+    <!-- Left inner ear molten flame cavity -->
+    <path android:pathData="M42.2,39.6 L37.6,31.2 L35.6,43.0 Z">
+        <aapt:attr name="android:fillColor">
+            <gradient
+                android:endX="39"
+                android:endY="43"
+                android:startX="38"
+                android:startY="31"
+                android:type="linear">
+                <item
+                    android:color="#FFFFB347"
+                    android:offset="0.0" />
+                <item
+                    android:color="#FFFF5722"
+                    android:offset="0.55" />
+                <item
+                    android:color="#FFE84A5F"
+                    android:offset="1.0" />
+            </gradient>
+        </aapt:attr>
+    </path>
+
+    <!-- Right inner ear molten flame cavity -->
+    <path android:pathData="M65.8,39.6 L70.4,31.2 L72.4,43.0 Z">
+        <aapt:attr name="android:fillColor">
+            <gradient
+                android:endX="69"
+                android:endY="43"
+                android:startX="70"
+                android:startY="31"
+                android:type="linear">
+                <item
+                    android:color="#FFFFB347"
+                    android:offset="0.0" />
+                <item
+                    android:color="#FFFF5722"
+                    android:offset="0.55" />
+                <item
+                    android:color="#FFE84A5F"
+                    android:offset="1.0" />
+            </gradient>
+        </aapt:attr>
+    </path>
+
+    <!-- Clockwork cheek armor plates -->
     <path
-        android:fillColor="#9FB1C9"
-        android:pathData="M54,42L64,48v12L54,66L44,60V48z" />
+        android:fillColor="#2A1D24"
+        android:pathData="M29.8,51.8 L40.6,55.5 L42.5,63.2 L34.0,62.4 Z"
+        android:strokeWidth="0.7"
+        android:strokeColor="#C68346" />
     <path
-        android:fillColor="#E84A5F"
-        android:pathData="M54,48L59,51v6L54,60L49,57V51z" />
+        android:fillColor="#2A1D24"
+        android:pathData="M78.2,51.8 L67.4,55.5 L65.5,63.2 L74.0,62.4 Z"
+        android:strokeWidth="0.7"
+        android:strokeColor="#C68346" />
+
+    <!-- Forehead nose bridge facet -->
+    <path
+        android:fillColor="#2E1C22"
+        android:pathData="M54.0,49.5 L57.5,58.5 L54.0,60.2 L50.5,58.5 Z" />
+
+    <!-- Forehead soul-gem / forge rune diamond -->
+    <path
+        android:pathData="M54.0,39.4 L57.3,44.2 L54.0,49.0 L50.7,44.2 Z"
+        android:strokeWidth="0.8"
+        android:strokeColor="#C68346">
+        <aapt:attr name="android:fillColor">
+            <gradient
+                android:endX="54"
+                android:endY="49"
+                android:startX="54"
+                android:startY="39"
+                android:type="linear">
+                <item
+                    android:color="#FFFFF2CC"
+                    android:offset="0.0" />
+                <item
+                    android:color="#FFFFB347"
+                    android:offset="0.45" />
+                <item
+                    android:color="#FFFF5722"
+                    android:offset="1.0" />
+            </gradient>
+        </aapt:attr>
+    </path>
+
+    <!-- Left glowing molten feline eye -->
+    <path
+        android:pathData="M37.0,50.0 Q43.2,46.8 49.0,52.4 Q43.0,56.2 37.0,50.0 Z"
+        android:strokeWidth="0.7"
+        android:strokeColor="#FF5722">
+        <aapt:attr name="android:fillColor">
+            <gradient
+                android:centerX="43.0"
+                android:centerY="51.4"
+                android:gradientRadius="6.5"
+                android:type="radial">
+                <item
+                    android:color="#FFFFF7DF"
+                    android:offset="0.0" />
+                <item
+                    android:color="#FFFFB347"
+                    android:offset="0.55" />
+                <item
+                    android:color="#FFFF5722"
+                    android:offset="1.0" />
+            </gradient>
+        </aapt:attr>
+    </path>
+    <!-- Left vertical feline slit pupil & glint -->
+    <path
+        android:fillColor="#14090C"
+        android:pathData="M43.0,48.8 Q44.3,51.6 43.0,54.6 Q41.7,51.6 43.0,48.8 Z" />
+    <path
+        android:fillColor="#FFFFF9E8"
+        android:pathData="M41.3,50.6 A0.9,0.9 0 1,0 41.3,52.4 A0.9,0.9 0 1,0 41.3,50.6 Z" />
+
+    <!-- Right glowing molten feline eye -->
+    <path
+        android:pathData="M71.0,50.0 Q64.8,46.8 59.0,52.4 Q65.0,56.2 71.0,50.0 Z"
+        android:strokeWidth="0.7"
+        android:strokeColor="#FF5722">
+        <aapt:attr name="android:fillColor">
+            <gradient
+                android:centerX="65.0"
+                android:centerY="51.4"
+                android:gradientRadius="6.5"
+                android:type="radial">
+                <item
+                    android:color="#FFFFF7DF"
+                    android:offset="0.0" />
+                <item
+                    android:color="#FFFFB347"
+                    android:offset="0.55" />
+                <item
+                    android:color="#FFFF5722"
+                    android:offset="1.0" />
+            </gradient>
+        </aapt:attr>
+    </path>
+    <!-- Right vertical feline slit pupil & glint -->
+    <path
+        android:fillColor="#14090C"
+        android:pathData="M65.0,48.8 Q66.3,51.6 65.0,54.6 Q63.7,51.6 65.0,48.8 Z" />
+    <path
+        android:fillColor="#FFFFF9E8"
+        android:pathData="M63.3,50.6 A0.9,0.9 0 1,0 63.3,52.4 A0.9,0.9 0 1,0 63.3,50.6 Z" />
+
+    <!-- Nose & brass muzzle lines -->
+    <path android:pathData="M50.6,59.8 L57.4,59.8 L54.0,63.8 Z">
+        <aapt:attr name="android:fillColor">
+            <gradient
+                android:endX="54"
+                android:endY="64"
+                android:startX="54"
+                android:startY="59.8"
+                android:type="linear">
+                <item
+                    android:color="#FFFF5722"
+                    android:offset="0.0" />
+                <item
+                    android:color="#FFE84A5F"
+                    android:offset="1.0" />
+            </gradient>
+        </aapt:attr>
+    </path>
+    <path
+        android:fillColor="#00000000"
+        android:pathData="M54.0,63.8 L54.0,67.2 M54.0,67.2 Q51.0,69.8 47.4,68.8 M54.0,67.2 Q57.0,69.8 60.6,68.8"
+        android:strokeWidth="1.15"
+        android:strokeColor="#C68346"
+        android:strokeLineCap="round" />
+
+    <!-- Angular clockwork cheek whisker lines -->
+    <path
+        android:fillColor="#00000000"
+        android:pathData="M45.5,62.4 L34.8,60.6 M45.5,64.8 L34.2,65.2 M62.5,62.4 L73.2,60.6 M62.5,64.8 L73.8,65.2"
+        android:strokeWidth="0.9"
+        android:strokeColor="#FF8A3D"
+        android:strokeLineCap="round" />
+
+    <!-- Rising ember sparks inside the safe zone -->
+    <path
+        android:fillColor="#FFFFB347"
+        android:pathData="M54.0,26.6 L55.4,28.4 L54.0,30.2 L52.6,28.4 Z" />
+    <path
+        android:fillColor="#FFFF8A3D"
+        android:pathData="M27.4,38.0 L28.6,39.5 L27.4,41.0 L26.2,39.5 Z" />
+    <path
+        android:fillColor="#FFFF5722"
+        android:pathData="M80.6,38.0 L81.8,39.5 L80.6,41.0 L79.4,39.5 Z" />
+    <path
+        android:fillColor="#FFFFE6A3"
+        android:pathData="M45.5,24.2 A1.0,1.0 0 1,0 45.5,26.2 A1.0,1.0 0 1,0 45.5,24.2 Z" />
+    <path
+        android:fillColor="#FFFFB347"
+        android:pathData="M62.5,24.2 A1.0,1.0 0 1,0 62.5,26.2 A1.0,1.0 0 1,0 62.5,24.2 Z" />
+
 </vector>

@@ -11,6 +11,7 @@ import android.net.Uri
 import android.os.Build
 import androidx.exifinterface.media.ExifInterface
 import com.fissal.forge.domain.logic.AspectRatioSnapper
+import com.fissal.forge.domain.logic.SampleCalibrationRatio
 import com.fissal.forge.domain.model.CompressMode
 import com.fissal.forge.domain.model.CropSpec
 import com.fissal.forge.domain.model.MediaKind
@@ -19,6 +20,7 @@ import com.fissal.forge.domain.model.PipelineSpec
 import com.homesoft.photo.libraw.LibRaw
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.ensureActive
 import kotlinx.coroutines.job
 import kotlinx.coroutines.sync.Semaphore
 import kotlinx.coroutines.sync.withPermit
@@ -30,8 +32,14 @@ import java.io.IOException
 import java.util.Locale
 import kotlin.coroutines.coroutineContext
 import kotlin.math.max
-import kotlin.math.min
 import kotlin.math.roundToInt
+import kotlin.math.roundToLong
+
+data class ImageSamplePreviewResult(
+    val originalBitmap: Bitmap,
+    val compressedBitmap: Bitmap,
+    val calibration: SampleCalibrationRatio
+)
 
 /**
  * Memory-safe, OOM-resistant image & Camera RAW processor.
@@ -115,16 +123,7 @@ class ImageRawEngine(private val appContext: Context) {
         onProgress(5f, "Allocating image decode pipeline...")
         val targetExt = (spec.convert?.targetExtension ?: if (probe.mediaKind == MediaKind.CAMERA_RAW) "jpg" else probe.extension)
             .lowercase(Locale.US)
-        val format = when (targetExt) {
-            "png" -> Bitmap.CompressFormat.PNG
-            "webp" -> if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
-                Bitmap.CompressFormat.WEBP_LOSSY
-            } else {
-                @Suppress("DEPRECATION")
-                Bitmap.CompressFormat.WEBP
-            }
-            else -> Bitmap.CompressFormat.JPEG
-        }
+        val format = resolveCompressFormat(targetExt)
 
         val maxDimLimit = spec.compress?.maxDimensionPx
         val useHalfSize = spec.compress?.rawHalfSizeFast == true ||
@@ -189,6 +188,159 @@ class ImageRawEngine(private val appContext: Context) {
         } finally {
             if (!workingBitmap.isRecycled) {
                 workingBitmap.recycle()
+            }
+        }
+    }
+
+    /**
+     * Generates an authentic in-memory Before/After preview pair and sample calibration ratio
+     * without mutating or recycling the caller's [previewBitmap].
+     */
+    suspend fun generateImageSamplePreview(
+        previewBitmap: Bitmap,
+        probe: MediaProbeResult,
+        spec: PipelineSpec
+    ): ImageSamplePreviewResult = withContext(Dispatchers.IO) {
+        if (previewBitmap.isRecycled) {
+            throw IOException("Preview bitmap has already been recycled")
+        }
+        coroutineContext.ensureActive()
+
+        val targetExt = (spec.convert?.targetExtension ?: if (probe.mediaKind == MediaKind.CAMERA_RAW) "jpg" else probe.extension)
+            .lowercase(Locale.US)
+        val format = resolveCompressFormat(targetExt)
+
+        // Compute true final output pixel dimensions to anchor areaScaleToFinal accurately
+        val fullSrcW = probe.effectiveWidth.takeIf { it > 0 } ?: previewBitmap.width
+        val fullSrcH = probe.effectiveHeight.takeIf { it > 0 } ?: previewBitmap.height
+        val fullCrop = if (spec.crop != null && fullSrcW > 1 && fullSrcH > 1) {
+            AspectRatioSnapper.toEvenPixelCrop(spec.crop.rect, fullSrcW, fullSrcH)
+        } else {
+            null
+        }
+        val fullPostCropW = fullCrop?.width ?: fullSrcW
+        val fullPostCropH = fullCrop?.height ?: fullSrcH
+        val rawHalf = probe.mediaKind == MediaKind.CAMERA_RAW && spec.compress?.rawHalfSizeFast == true
+        val postHalfW = if (rawHalf) (fullPostCropW / 2.0) else fullPostCropW.toDouble()
+        val postHalfH = if (rawHalf) (fullPostCropH / 2.0) else fullPostCropH.toDouble()
+        val postHalfMax = max(postHalfW, postHalfH).coerceAtLeast(1.0)
+        val reqMaxDim = spec.compress?.maxDimensionPx?.takeIf { it > 0 }
+        val finalScale = if (reqMaxDim != null && postHalfMax > reqMaxDim) {
+            reqMaxDim.toDouble() / postHalfMax
+        } else {
+            1.0
+        }
+        val fullFinalW = (postHalfW * finalScale).coerceAtLeast(2.0)
+        val fullFinalH = (postHalfH * finalScale).coerceAtLeast(2.0)
+        val fullOutputPixels = fullFinalW * fullFinalH
+
+        var croppedTemp: Bitmap? = null
+        var workingTemp: Bitmap? = null
+        var originalOut: Bitmap? = null
+        var compressedOut: Bitmap? = null
+
+        try {
+            val postCropSource: Bitmap = if (spec.crop != null) {
+                val px = AspectRatioSnapper.toEvenPixelCrop(spec.crop.rect, previewBitmap.width, previewBitmap.height)
+                if (px.width < previewBitmap.width || px.height < previewBitmap.height) {
+                    Bitmap.createBitmap(previewBitmap, px.x, px.y, px.width, px.height).also {
+                        croppedTemp = it
+                    }
+                } else {
+                    previewBitmap
+                }
+            } else {
+                previewBitmap
+            }
+
+            val previewCurMax = max(postCropSource.width, postCropSource.height).coerceAtLeast(1)
+            val targetPreviewMax = if (reqMaxDim != null && reqMaxDim < previewCurMax) {
+                reqMaxDim.coerceIn(120, 1440)
+            } else {
+                previewCurMax.coerceAtMost(1440)
+            }
+
+            val working: Bitmap = if (targetPreviewMax < previewCurMax) {
+                val s = targetPreviewMax.toFloat() / previewCurMax.toFloat()
+                val sw = ((postCropSource.width * s).roundToInt() and 1.inv()).coerceIn(2, 1440)
+                val sh = ((postCropSource.height * s).roundToInt() and 1.inv()).coerceIn(2, 1440)
+                Bitmap.createScaledBitmap(postCropSource, sw, sh, true).also {
+                    workingTemp = it
+                }
+            } else if (postCropSource === previewBitmap) {
+                previewBitmap.copy(Bitmap.Config.ARGB_8888, false).also {
+                    workingTemp = it
+                }
+            } else {
+                postCropSource
+            }
+
+            coroutineContext.ensureActive()
+
+            val samplePixels = (working.width.toDouble() * working.height.toDouble()).coerceAtLeast(1.0)
+            val areaScaleToFinal = (fullOutputPixels / samplePixels).coerceAtLeast(0.05)
+
+            // Reference baseline at JPEG Q95 on the exact sample geometry
+            val refBaos = ByteArrayOutputStream()
+            working.compress(Bitmap.CompressFormat.JPEG, 95, refBaos)
+            val originalRefBytes = refBaos.size().toLong().coerceAtLeast(1L)
+
+            coroutineContext.ensureActive()
+
+            val compress = spec.compress
+            val targetBytes = if (compress?.mode == CompressMode.TARGET_BYTES) compress.targetBytes else null
+            val compressedBytes: ByteArray = if (targetBytes != null) {
+                val scaledSampleTarget = (targetBytes.toDouble() / areaScaleToFinal).roundToLong().coerceAtLeast(1024L)
+                if (format == Bitmap.CompressFormat.PNG) {
+                    encodePngToTargetByteArray(working, scaledSampleTarget, minDimFloor = 96, stopDim = 120)
+                } else {
+                    encodeToTargetByteArray(working, format, scaledSampleTarget, minDimFloor = 96)
+                }
+            } else {
+                val quality = (compress?.imageQuality ?: 90).coerceIn(15, 100)
+                val outBaos = ByteArrayOutputStream()
+                if (!working.compress(format, quality, outBaos)) {
+                    throw IOException("Failed to encode image sample preview ($targetExt)")
+                }
+                outBaos.toByteArray()
+            }
+
+            coroutineContext.ensureActive()
+
+            compressedOut = BitmapFactory.decodeByteArray(
+                compressedBytes,
+                0,
+                compressedBytes.size,
+                BitmapFactory.Options().apply { inPreferredConfig = Bitmap.Config.ARGB_8888 }
+            ) ?: working.copy(Bitmap.Config.ARGB_8888, false)
+                ?: throw IOException("Failed to decode compressed sample preview")
+
+            originalOut = working.copy(Bitmap.Config.ARGB_8888, false)
+                ?: throw IOException("Failed to copy original sample preview")
+
+            ImageSamplePreviewResult(
+                originalBitmap = originalOut,
+                compressedBitmap = compressedOut,
+                calibration = SampleCalibrationRatio(
+                    referenceBytes = originalRefBytes,
+                    compressedBytes = compressedBytes.size.toLong().coerceAtLeast(1L),
+                    areaScaleToFinal = areaScaleToFinal
+                )
+            )
+        } catch (err: Throwable) {
+            originalOut?.let { if (!it.isRecycled) it.recycle() }
+            compressedOut?.let { if (!it.isRecycled) it.recycle() }
+            throw err
+        } finally {
+            workingTemp?.let { bmp ->
+                if (bmp !== previewBitmap && bmp !== originalOut && bmp !== compressedOut && !bmp.isRecycled) {
+                    bmp.recycle()
+                }
+            }
+            croppedTemp?.let { bmp ->
+                if (bmp !== previewBitmap && bmp !== originalOut && bmp !== compressedOut && bmp !== workingTemp && !bmp.isRecycled) {
+                    bmp.recycle()
+                }
             }
         }
     }
@@ -279,12 +431,36 @@ class ImageRawEngine(private val appContext: Context) {
         return applyExifRotation(decoded, probe.rotationDegrees)
     }
 
+    private fun resolveCompressFormat(targetExt: String): Bitmap.CompressFormat = when (targetExt) {
+        "png" -> Bitmap.CompressFormat.PNG
+        "webp" -> if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
+            Bitmap.CompressFormat.WEBP_LOSSY
+        } else {
+            @Suppress("DEPRECATION")
+            Bitmap.CompressFormat.WEBP
+        }
+        else -> Bitmap.CompressFormat.JPEG
+    }
+
     private fun encodeToTargetBytes(
         bitmap: Bitmap,
         format: Bitmap.CompressFormat,
         targetBytes: Long,
         outputFile: File
     ) {
+        val bytes = encodeToTargetByteArray(bitmap, format, targetBytes, minDimFloor = 160)
+        FileOutputStream(outputFile).use { fos ->
+            fos.write(bytes)
+            fos.flush()
+        }
+    }
+
+    private fun encodeToTargetByteArray(
+        bitmap: Bitmap,
+        format: Bitmap.CompressFormat,
+        targetBytes: Long,
+        minDimFloor: Int
+    ): ByteArray {
         var working = bitmap
         var createdCopy = false
         try {
@@ -308,16 +484,12 @@ class ImageRawEngine(private val appContext: Context) {
                 }
 
                 if (bestBytes != null) {
-                    FileOutputStream(outputFile).use {
-                        it.write(bestBytes)
-                        it.flush()
-                    }
-                    return
+                    return bestBytes
                 }
 
                 // Still over budget at Q16 -> step down resolution smoothly by 0.88x
-                val nextW = (working.width * 0.88f).roundToInt().coerceAtLeast(160)
-                val nextH = (working.height * 0.88f).roundToInt().coerceAtLeast(160)
+                val nextW = (working.width * 0.88f).roundToInt().coerceAtLeast(minDimFloor)
+                val nextH = (working.height * 0.88f).roundToInt().coerceAtLeast(minDimFloor)
                 val scaled = Bitmap.createScaledBitmap(working, nextW, nextH, true)
                 if (createdCopy && working !== bitmap && !working.isRecycled) {
                     working.recycle()
@@ -326,11 +498,10 @@ class ImageRawEngine(private val appContext: Context) {
                 createdCopy = true
             }
 
-            // Final fallback write at Q24 after smooth downscaling
-            FileOutputStream(outputFile).use { fos ->
-                working.compress(format, 24, fos)
-                fos.flush()
-            }
+            // Final fallback at Q24 after smooth downscaling
+            val fallback = ByteArrayOutputStream()
+            working.compress(format, 24, fallback)
+            return fallback.toByteArray()
         } finally {
             if (createdCopy && working !== bitmap && !working.isRecycled) {
                 working.recycle()
@@ -339,6 +510,19 @@ class ImageRawEngine(private val appContext: Context) {
     }
 
     private fun encodePngToTargetBytes(bitmap: Bitmap, targetBytes: Long, outputFile: File) {
+        val bytes = encodePngToTargetByteArray(bitmap, targetBytes, minDimFloor = 160, stopDim = 240)
+        FileOutputStream(outputFile).use { fos ->
+            fos.write(bytes)
+            fos.flush()
+        }
+    }
+
+    private fun encodePngToTargetByteArray(
+        bitmap: Bitmap,
+        targetBytes: Long,
+        minDimFloor: Int,
+        stopDim: Int
+    ): ByteArray {
         var working = bitmap
         var createdCopy = false
         try {
@@ -346,15 +530,11 @@ class ImageRawEngine(private val appContext: Context) {
                 val baos = ByteArrayOutputStream()
                 working.compress(Bitmap.CompressFormat.PNG, 100, baos)
                 val data = baos.toByteArray()
-                if (data.size <= targetBytes || max(working.width, working.height) <= 240) {
-                    FileOutputStream(outputFile).use {
-                        it.write(data)
-                        it.flush()
-                    }
-                    return
+                if (data.size <= targetBytes || max(working.width, working.height) <= stopDim) {
+                    return data
                 }
-                val nextW = (working.width * 0.78f).roundToInt().coerceAtLeast(160)
-                val nextH = (working.height * 0.78f).roundToInt().coerceAtLeast(160)
+                val nextW = (working.width * 0.78f).roundToInt().coerceAtLeast(minDimFloor)
+                val nextH = (working.height * 0.78f).roundToInt().coerceAtLeast(minDimFloor)
                 val scaled = Bitmap.createScaledBitmap(working, nextW, nextH, true)
                 if (createdCopy && working !== bitmap && !working.isRecycled) {
                     working.recycle()
@@ -362,10 +542,9 @@ class ImageRawEngine(private val appContext: Context) {
                 working = scaled
                 createdCopy = true
             }
-            FileOutputStream(outputFile).use { fos ->
-                working.compress(Bitmap.CompressFormat.PNG, 100, fos)
-                fos.flush()
-            }
+            val fallback = ByteArrayOutputStream()
+            working.compress(Bitmap.CompressFormat.PNG, 100, fallback)
+            return fallback.toByteArray()
         } finally {
             if (createdCopy && working !== bitmap && !working.isRecycled) {
                 working.recycle()
@@ -421,7 +600,7 @@ class ImageRawEngine(private val appContext: Context) {
     }
 
     companion object {
-        private const val MAX_SAFE_RASTER_DIM = 4096
+        private const val MAX_SAFE_RASTER_DIM = 3840
         private val REGION_DECODABLE_EXTENSIONS = setOf("jpg", "jpeg", "png", "webp")
         private val SAFE_EXIF_TAGS = listOf(
             ExifInterface.TAG_MAKE,

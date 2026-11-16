@@ -70,6 +70,34 @@ enum class CompressMode {
     TARGET_BYTES
 }
 
+/**
+ * Segment categories supported by yt-dlp `--sponsorblock-remove`.
+ */
+@Serializable
+enum class SponsorBlockCategory(
+    val ytDlpKey: String,
+    val label: String,
+    val description: String
+) {
+    SPONSOR("sponsor", "Sponsors", "Paid promotion, sponsor reads, and direct advertisements"),
+    SELFPROMO("selfpromo", "Self-Promo", "Unpaid merch, Patreon plugs, and creator self-promotion"),
+    INTERACTION("interaction", "Interaction Reminders", "Like, subscribe, and notification bell reminders"),
+    INTRO("intro", "Intros / Intermissions", "Recurring intro animations or intermission bumpers"),
+    OUTRO("outro", "Endcards / Credits", "Closing credits and endcard overlays"),
+    PREVIEW("preview", "Previews / Recaps", "Recaps or upcoming teaser segments"),
+    MUSIC_OFFTOPIC("music_offtopic", "Non-Music Sections", "Sketches or non-music dialogue in music videos")
+}
+
+/**
+ * Configuration for FFmpeg silence detection / dead-air removal (`silenceremove`).
+ */
+@Serializable
+data class SilenceSkipSpec(
+    val enabled: Boolean = false,
+    val thresholdDb: Int = -38,
+    val minSilenceMs: Int = 600
+)
+
 @Serializable
 data class DownloadSpec(
     val url: String,
@@ -81,8 +109,22 @@ data class DownloadSpec(
     val embedMetadata: Boolean = true,
     val embedThumbnail: Boolean = true,
     val sponsorBlock: Boolean = false,
-    val useAria2c: Boolean = true
-)
+    val useAria2c: Boolean = true,
+    val sponsorBlockCategories: Set<SponsorBlockCategory> = emptySet(),
+    val siteConnectionId: String? = null,
+    val splitByChapters: Boolean = false
+) {
+    /**
+     * Resolves active SponsorBlock categories, preserving legacy boolean [sponsorBlock] behavior
+     * when explicit [sponsorBlockCategories] have not been chosen.
+     */
+    val effectiveSponsorBlockCategories: Set<SponsorBlockCategory>
+        get() = when {
+            sponsorBlockCategories.isNotEmpty() -> sponsorBlockCategories
+            sponsorBlock -> setOf(SponsorBlockCategory.SPONSOR)
+            else -> emptySet()
+        }
+}
 
 @Serializable
 data class ConvertSpec(
@@ -109,7 +151,8 @@ data class TrimSpec(
     val endMs: Long? = null,
     val fastKeyframeCopy: Boolean = false,
     val fadeInOut: Boolean = false,
-    val muteAudio: Boolean = false
+    val muteAudio: Boolean = false,
+    val silenceSkip: SilenceSkipSpec? = null
 )
 
 @Serializable
@@ -133,10 +176,16 @@ data class PipelineSpec(
     val compress: CompressSpec? = null,
     val trim: TrimSpec? = null,
     val crop: CropSpec? = null,
-    val delivery: DeliverySpec = DeliverySpec()
+    val delivery: DeliverySpec = DeliverySpec(),
+    val silenceSkip: SilenceSkipSpec? = null
 ) {
     val hasTransformStage: Boolean
-        get() = convert != null || compress != null || trim != null || crop != null
+        get() = convert != null ||
+            compress != null ||
+            trim != null ||
+            crop != null ||
+            (silenceSkip?.enabled == true) ||
+            (trim?.silenceSkip?.enabled == true)
 
     fun summaryLabel(): String {
         val parts = mutableListOf<String>()
@@ -152,6 +201,9 @@ data class PipelineSpec(
         }
         if (trim != null) parts += "Trim"
         if (crop != null) parts += "Crop ${crop.preset.label}"
+        if (silenceSkip?.enabled == true || trim?.silenceSkip?.enabled == true) {
+            parts += "Silence Skip"
+        }
         if (delivery.copyToClipboard && !delivery.saveToDevice) parts += "Copy Only"
         else if (delivery.copyToClipboard) parts += "+Clipboard"
         return if (parts.isEmpty()) "Passthrough" else parts.joinToString(" • ")

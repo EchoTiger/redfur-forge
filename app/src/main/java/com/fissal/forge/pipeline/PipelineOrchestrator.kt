@@ -1,6 +1,5 @@
 package com.fissal.forge.pipeline
 
-import android.app.ActivityManager
 import android.content.Context
 import android.net.Uri
 import androidx.core.content.FileProvider
@@ -13,6 +12,8 @@ import com.fissal.forge.data.settings.ForgeSettingsRepository
 import com.fissal.forge.delivery.ClipboardExportManager
 import com.fissal.forge.delivery.MediaStoreExporter
 import com.fissal.forge.domain.logic.BitrateBudgetCalculator
+import com.fissal.forge.domain.logic.DeviceCapabilityAdvisor
+import com.fissal.forge.domain.logic.DeviceCapabilityReport
 import com.fissal.forge.domain.model.AudioCodecChoice
 import com.fissal.forge.domain.model.CompressMode
 import com.fissal.forge.domain.model.CompressSpec
@@ -79,7 +80,8 @@ class PipelineOrchestrator(
     private val ffmpegEngine: FFmpegCliEngine,
     private val imageRawEngine: ImageRawEngine,
     private val mediaStoreExporter: MediaStoreExporter,
-    val clipboardExportManager: ClipboardExportManager
+    val clipboardExportManager: ClipboardExportManager,
+    private val deviceCapabilities: DeviceCapabilityReport = DeviceCapabilityAdvisor.profileDevice(appContext)
 ) {
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
     private val json = Json { ignoreUnknownKeys = true; encodeDefaults = true }
@@ -334,8 +336,11 @@ class PipelineOrchestrator(
                 audioFormat = linkSettings.audioFormat,
                 embedMetadata = linkSettings.embedMetadata,
                 embedThumbnail = globalSettings.embedDownloadThumbnail && linkSettings.embedMetadata,
-                sponsorBlock = linkSettings.sponsorBlock,
-                useAria2c = globalSettings.useAria2c
+                sponsorBlock = linkSettings.effectiveSponsorBlockCategories.isNotEmpty(),
+                useAria2c = globalSettings.useAria2c,
+                sponsorBlockCategories = linkSettings.sponsorBlockCategories,
+                siteConnectionId = linkSettings.siteConnectionId,
+                splitByChapters = linkSettings.splitByChapters
             ),
             convert = convertSpec,
             compress = compressSpec,
@@ -558,7 +563,12 @@ class PipelineOrchestrator(
 
     fun clearAllCaches(): Long {
         var cleared = 0L
-        listOf(exportsDir, jobsWorkRoot, File(appContext.cacheDir, "probe_staging")).forEach { dir ->
+        listOf(
+            exportsDir,
+            jobsWorkRoot,
+            File(appContext.cacheDir, "probe_staging"),
+            File(appContext.cacheDir, "sample_preview")
+        ).forEach { dir ->
             cleared += directorySizeBytes(dir)
             dir.deleteRecursively()
         }
@@ -580,6 +590,7 @@ class PipelineOrchestrator(
         return directorySizeBytes(exportsDir) +
             directorySizeBytes(jobsWorkRoot) +
             directorySizeBytes(File(appContext.cacheDir, "probe_staging")) +
+            directorySizeBytes(File(appContext.cacheDir, "sample_preview")) +
             directorySizeBytes(File(appContext.cacheDir, "updates")) +
             clipboardExportManager.clipboardCacheSizeBytes()
     }
@@ -815,7 +826,11 @@ class PipelineOrchestrator(
             }
             MediaKind.VIDEO, MediaKind.AUDIO -> {
                 val inputFile = stagedInput ?: probeEngine.stageUriToTempFile(sourceUri, File(workDir, "in"), "src")
-                val threads = if (effectiveMaxComputeSlots() <= 2) 4 else 3
+                val threads = if (effectiveMaxComputeSlots() <= 2) {
+                    deviceCapabilities.recommendedFfmpegThreads
+                } else {
+                    deviceCapabilities.recommendedFfmpegThreads.coerceAtMost(4)
+                }
                 ffmpegEngine.executePipeline(
                     inputFile = inputFile,
                     outputFile = outFile,
@@ -903,15 +918,7 @@ class PipelineOrchestrator(
     }
 
     private fun defaultComputeSlotsForDeviceRam(): Int {
-        val am = appContext.getSystemService(Context.ACTIVITY_SERVICE) as ActivityManager
-        val info = ActivityManager.MemoryInfo()
-        am.getMemoryInfo(info)
-        val totalGb = info.totalMem / (1024.0 * 1024.0 * 1024.0)
-        return when {
-            totalGb <= 6.2 -> 2
-            totalGb <= 9.2 -> 3
-            else -> 4
-        }
+        return deviceCapabilities.recommendedComputeSlots
     }
 
     private fun refreshMetrics() {

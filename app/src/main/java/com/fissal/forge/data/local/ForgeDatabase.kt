@@ -8,12 +8,13 @@ import androidx.room.migration.Migration
 import androidx.sqlite.db.SupportSQLiteDatabase
 
 @Database(
-    entities = [ForgeJobEntity::class],
-    version = 2,
+    entities = [ForgeJobEntity::class, FormatPresetEntity::class],
+    version = 3,
     exportSchema = false
 )
 abstract class ForgeDatabase : RoomDatabase() {
     abstract fun jobDao(): ForgeJobDao
+    abstract fun presetDao(): FormatPresetDao
 
     companion object {
         @Volatile
@@ -29,6 +30,26 @@ abstract class ForgeDatabase : RoomDatabase() {
             }
         }
 
+        val MIGRATION_2_3 = object : Migration(2, 3) {
+            override fun migrate(db: SupportSQLiteDatabase) {
+                db.execSQL(
+                    "CREATE TABLE IF NOT EXISTS format_presets (" +
+                        "id TEXT NOT NULL, " +
+                        "emoji TEXT NOT NULL, " +
+                        "name TEXT NOT NULL, " +
+                        "mediaKind TEXT NOT NULL, " +
+                        "specJson TEXT NOT NULL, " +
+                        "isDefaultForKind INTEGER NOT NULL, " +
+                        "createdAt INTEGER NOT NULL, " +
+                        "PRIMARY KEY(id))"
+                )
+                db.execSQL(
+                    "CREATE INDEX IF NOT EXISTS index_format_presets_mediaKind " +
+                        "ON format_presets (mediaKind)"
+                )
+            }
+        }
+
         fun getInstance(context: Context): ForgeDatabase {
             return INSTANCE ?: synchronized(this) {
                 INSTANCE ?: Room.databaseBuilder(
@@ -36,7 +57,7 @@ abstract class ForgeDatabase : RoomDatabase() {
                     ForgeDatabase::class.java,
                     "redfur_forge.db"
                 )
-                    .addMigrations(MIGRATION_1_2)
+                    .addMigrations(MIGRATION_1_2, MIGRATION_2_3)
                     .fallbackToDestructiveMigration()
                     .build()
                     .also { INSTANCE = it }

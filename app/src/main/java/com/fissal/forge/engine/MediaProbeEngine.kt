@@ -10,7 +10,10 @@ import androidx.exifinterface.media.ExifInterface
 import com.fissal.forge.domain.model.MediaKind
 import com.fissal.forge.domain.model.MediaProbeResult
 import com.homesoft.photo.libraw.LibRaw
+import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.currentCoroutineContext
+import kotlinx.coroutines.ensureActive
 import kotlinx.coroutines.withContext
 import org.json.JSONObject
 import java.io.File
@@ -79,41 +82,48 @@ class MediaProbeEngine(
             }
         }
 
-    fun stageUriToTempFile(uri: Uri, targetDir: File, prefix: String = "input"): File {
-        if (!targetDir.exists()) targetDir.mkdirs()
-        if (uri.scheme == "file" && uri.path != null) {
-            val direct = File(uri.path!!)
-            if (direct.exists() && direct.canRead()) return direct
-        }
-
-        val displayName = resolveDisplayName(uri)
-        val ext = displayName.substringAfterLast('.', "").lowercase(Locale.US)
-            .ifBlank { mimeToExtension(resolveMimeType(uri, displayName)) }
-            .ifBlank { "bin" }
-
-        val estimatedSize = resolveFileSize(uri)
-        ensureStorageAvailable(targetDir, (estimatedSize * 2L) + MIN_FREE_HEADROOM_BYTES)
-
-        val safeBase = displayName.substringBeforeLast('.')
-            .replace(Regex("""[^A-Za-z0-9._-]"""), "_")
-            .take(48)
-            .ifBlank { prefix }
-        val stagedFile = File(targetDir, "${prefix}_${System.currentTimeMillis()}_${safeBase}.$ext")
-
-        appContext.contentResolver.openInputStream(uri)?.use { input ->
-            FileOutputStream(stagedFile).use { output ->
-                val buffer = ByteArray(STREAM_BUFFER_BYTES)
-                while (true) {
-                    val read = input.read(buffer)
-                    if (read == -1) break
-                    output.write(buffer, 0, read)
-                }
-                output.flush()
+    suspend fun stageUriToTempFile(uri: Uri, targetDir: File, prefix: String = "input"): File =
+        withContext(Dispatchers.IO) {
+            if (!targetDir.exists()) targetDir.mkdirs()
+            if (uri.scheme == "file" && uri.path != null) {
+                val direct = File(uri.path!!)
+                if (direct.exists() && direct.canRead()) return@withContext direct
             }
-        } ?: throw IOException("Unable to open input stream for $uri")
 
-        return stagedFile
-    }
+            val displayName = resolveDisplayName(uri)
+            val ext = displayName.substringAfterLast('.', "").lowercase(Locale.US)
+                .ifBlank { mimeToExtension(resolveMimeType(uri, displayName)) }
+                .ifBlank { "bin" }
+
+            val estimatedSize = resolveFileSize(uri)
+            ensureStorageAvailable(targetDir, (estimatedSize * 2L) + MIN_FREE_HEADROOM_BYTES)
+
+            val safeBase = displayName.substringBeforeLast('.')
+                .replace(Regex("""[^A-Za-z0-9._-]"""), "_")
+                .take(48)
+                .ifBlank { prefix }
+            val stagedFile = File(targetDir, "${prefix}_${System.currentTimeMillis()}_${safeBase}.$ext")
+
+            try {
+                appContext.contentResolver.openInputStream(uri)?.use { input ->
+                    FileOutputStream(stagedFile).use { output ->
+                        val buffer = ByteArray(STREAM_BUFFER_BYTES)
+                        while (true) {
+                            currentCoroutineContext().ensureActive()
+                            val read = input.read(buffer)
+                            if (read == -1) break
+                            output.write(buffer, 0, read)
+                        }
+                        output.flush()
+                    }
+                } ?: throw IOException("Unable to open input stream for $uri")
+            } catch (t: Throwable) {
+                runCatching { stagedFile.delete() }
+                throw t
+            }
+
+            stagedFile
+        }
 
     fun ensureStorageAvailable(dir: File, requiredBytes: Long) {
         if (!dir.exists()) dir.mkdirs()
@@ -267,7 +277,13 @@ class MediaProbeEngine(
         } catch (_: Throwable) {
             // Fallback to staging + ffprobe for containers MediaMetadataRetriever cannot read (e.g. certain MKV/WebM/OPUS)
             val tempDir = File(appContext.cacheDir, "probe_staging")
-            val staged = runCatching { stageUriToTempFile(uri, tempDir, "probe") }.getOrNull()
+            val staged = try {
+                stageUriToTempFile(uri, tempDir, "probe")
+            } catch (ce: CancellationException) {
+                throw ce
+            } catch (_: Throwable) {
+                null
+            }
             try {
                 if (staged != null) {
                     probeLocalFileWithFfprobe(staged, uri.toString(), displayName, mimeType, extension, initialKind)

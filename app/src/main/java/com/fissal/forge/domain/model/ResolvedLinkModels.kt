@@ -1,8 +1,12 @@
 package com.fissal.forge.domain.model
 
+import java.util.Locale
+import kotlinx.serialization.Serializable
+
 /**
  * High-level media classification inferred before or after link resolution.
  */
+@Serializable
 enum class DetectedLinkKind(val label: String) {
     VIDEO("Video"),
     AUDIO("Audio"),
@@ -10,12 +14,14 @@ enum class DetectedLinkKind(val label: String) {
     IMAGE("Image")
 }
 
+@Serializable
 enum class LinkResolveState {
     RESOLVING,
     RESOLVED,
     FAILED
 }
 
+@Serializable
 data class PlaylistTrackItem(
     val index: Int,
     val trackId: String,
@@ -37,8 +43,39 @@ data class PlaylistTrackItem(
 }
 
 /**
+ * Chapter segment entry extracted from resolved media metadata for selective split downloads.
+ */
+@Serializable
+data class ChapterTrackItem(
+    val index: Int,
+    val title: String,
+    val startMs: Long,
+    val endMs: Long,
+    val selected: Boolean = true,
+    val customSettings: LinkItemSettings? = null
+) {
+    val durationMs: Long
+        get() = (endMs - startMs).coerceAtLeast(0L)
+
+    fun formattedRange(): String = "${formatChapterTimestamp(startMs)} - ${formatChapterTimestamp(endMs)}"
+}
+
+private fun formatChapterTimestamp(ms: Long): String {
+    val totalSec = ms.coerceAtLeast(0L) / 1000L
+    val h = totalSec / 3600L
+    val m = (totalSec % 3600L) / 60L
+    val s = totalSec % 60L
+    return if (h > 0L) {
+        String.format(Locale.US, "%d:%02d:%02d", h, m, s)
+    } else {
+        String.format(Locale.US, "%d:%02d", m, s)
+    }
+}
+
+/**
  * Resolved metadata returned by YtDlpEngine.resolveMetadata(--flat-playlist --dump-single-json).
  */
+@Serializable
 data class ResolvedUrlMetadata(
     val sourceUrl: String,
     val host: String,
@@ -49,9 +86,11 @@ data class ResolvedUrlMetadata(
     val contentMediaKind: DetectedLinkKind = DetectedLinkKind.VIDEO,
     val durationSec: Long? = null,
     val approxBytes: Long? = null,
-    val tracks: List<PlaylistTrackItem> = emptyList()
+    val tracks: List<PlaylistTrackItem> = emptyList(),
+    val chapters: List<ChapterTrackItem> = emptyList()
 )
 
+@Serializable
 data class LinkItemSettings(
     val mode: DownloadMode = DownloadMode.VIDEO_MP4,
     val maxHeight: Int? = 1080,
@@ -62,8 +101,22 @@ data class LinkItemSettings(
     val sponsorBlock: Boolean = false,
     val embedMetadata: Boolean = true,
     val stripMetadata: Boolean = false,
-    val scopeBadge: String? = null
+    val scopeBadge: String? = null,
+    val sponsorBlockCategories: Set<SponsorBlockCategory> = emptySet(),
+    val siteConnectionId: String? = null,
+    val splitByChapters: Boolean = false
 ) {
+    /**
+     * Resolves active SponsorBlock categories, preserving legacy boolean [sponsorBlock] behavior
+     * when explicit [sponsorBlockCategories] have not been chosen.
+     */
+    val effectiveSponsorBlockCategories: Set<SponsorBlockCategory>
+        get() = when {
+            sponsorBlockCategories.isNotEmpty() -> sponsorBlockCategories
+            sponsorBlock -> setOf(SponsorBlockCategory.SPONSOR)
+            else -> emptySet()
+        }
+
     fun compactSummary(): String {
         val parts = mutableListOf<String>()
         parts += when (mode) {
@@ -85,6 +138,7 @@ data class LinkItemSettings(
     }
 }
 
+@Serializable
 data class ResolvedLinkChipItem(
     val cleanUrl: String,
     val host: String,
@@ -101,10 +155,14 @@ data class ResolvedLinkChipItem(
     val settings: LinkItemSettings = LinkItemSettings(),
     val isExpanded: Boolean = false,
     val errorHint: String? = null,
-    val userCustomized: Boolean = false
+    val userCustomized: Boolean = false,
+    val chapters: List<ChapterTrackItem> = emptyList()
 ) {
     val selectedTrackCount: Int
         get() = tracks.count { it.selected }
+
+    val selectedChapterCount: Int
+        get() = chapters.count { it.selected }
 
     val effectivePlaylistActive: Boolean
         get() = !settings.playlistSingleOnly && (tracks.isNotEmpty() || detectedKind == DetectedLinkKind.PLAYLIST || isPlaylistLikeUrl)

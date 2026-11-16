@@ -14,17 +14,16 @@ import androidx.activity.result.contract.ActivityResultContracts
 import androidx.activity.viewModels
 import androidx.compose.animation.AnimatedVisibility
 import androidx.compose.foundation.BorderStroke
+import androidx.compose.foundation.Image
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.Row
-import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
-import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.rounded.List
@@ -60,6 +59,7 @@ import androidx.compose.runtime.remember
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
+import androidx.compose.ui.res.painterResource
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.core.content.ContextCompat
@@ -70,17 +70,22 @@ import com.fissal.forge.ui.screens.QueueScreen
 import com.fissal.forge.ui.screens.SettingsScreen
 import com.fissal.forge.ui.screens.StudioEditorScreen
 import com.fissal.forge.ui.theme.AmberActive
+import com.fissal.forge.ui.theme.AnvilGunmetal
+import com.fissal.forge.ui.theme.ArcRelayCyan
 import com.fissal.forge.ui.theme.CoralError
 import com.fissal.forge.ui.theme.CrispWhite
+import com.fissal.forge.ui.theme.EmberFlame
 import com.fissal.forge.ui.theme.EmeraldSuccess
+import com.fissal.forge.ui.theme.FurnaceCard
 import com.fissal.forge.ui.theme.MasserCrimson
 import com.fissal.forge.ui.theme.MutedSteel
 import com.fissal.forge.ui.theme.ObsidianBg
 import com.fissal.forge.ui.theme.RedfurForgeTheme
+import com.fissal.forge.ui.theme.RelayBevelOutline
+import com.fissal.forge.ui.theme.RelaySurface
 import com.fissal.forge.ui.theme.SecundaSilver
-import com.fissal.forge.ui.theme.SlateCard
 import com.fissal.forge.ui.theme.SlateOutline
-import com.fissal.forge.ui.theme.SlateSurface
+import com.fissal.forge.ui.theme.VolcanicObsidian
 import com.fissal.forge.update.AppUpdateManager
 import com.fissal.forge.update.AppUpdatePhase
 import com.fissal.forge.update.AppUpdateState
@@ -110,6 +115,7 @@ class MainActivity : ComponentActivity() {
                 val cacheSizeBytes by viewModel.cacheSizeBytes.collectAsState()
                 val statusBanner by viewModel.statusBanner.collectAsState()
                 val appUpdateState by viewModel.appUpdateState.collectAsState()
+                val deviceCapabilities = viewModel.deviceCapabilities
 
                 val snackbarHostState = remember { SnackbarHostState() }
 
@@ -190,8 +196,17 @@ class MainActivity : ComponentActivity() {
                     StudioEditorScreen(
                         state = currentStudio,
                         jobs = jobs,
+                        deviceCapabilities = deviceCapabilities,
+                        buildSpecForItem = { probe, cfg, forceCompress ->
+                            viewModel.buildPipelineSpecForStudioItem(
+                                probe = probe,
+                                cfg = cfg,
+                                forceCompressSpec = forceCompress
+                            )
+                        },
                         onUpdate = viewModel::updateStudio,
                         onSelectTab = viewModel::updateStudioTab,
+                        onToggleSamplePreview = viewModel::toggleSamplePreviewComparison,
                         onClearInlineWatch = viewModel::clearInlineWatchJobs,
                         onSelectBatchItem = viewModel::selectStudioItem,
                         onApplySameType = viewModel::applyStudioToSameType,
@@ -203,35 +218,45 @@ class MainActivity : ComponentActivity() {
                     )
                 } else {
                     Scaffold(
-                        containerColor = ObsidianBg,
+                        containerColor = VolcanicObsidian,
                         snackbarHost = { SnackbarHost(snackbarHostState) },
                         topBar = {
                             TopAppBar(
-                                colors = TopAppBarDefaults.topAppBarColors(containerColor = SlateSurface),
+                                colors = TopAppBarDefaults.topAppBarColors(containerColor = AnvilGunmetal),
                                 title = {
-                                    Text(
-                                        text = when (selectedTab) {
-                                            MainTab.FORGE -> "Redfur Forge"
-                                            MainTab.QUEUE -> "Pipeline Queue"
-                                            MainTab.SETTINGS -> "Forge Settings"
-                                        },
-                                        style = MaterialTheme.typography.headlineSmall,
-                                        color = CrispWhite
-                                    )
+                                    Row(
+                                        verticalAlignment = Alignment.CenterVertically,
+                                        horizontalArrangement = Arrangement.spacedBy(10.dp)
+                                    ) {
+                                        Image(
+                                            painter = painterResource(id = R.drawable.ic_forge_fissal_emblem),
+                                            contentDescription = "Forge Fissal emblem",
+                                            modifier = Modifier.size(32.dp)
+                                        )
+                                        Text(
+                                            text = when (selectedTab) {
+                                                MainTab.FORGE -> "Redfur Forge"
+                                                MainTab.QUEUE -> "Pipeline Queue"
+                                                MainTab.SETTINGS -> "Forge Settings"
+                                            },
+                                            style = MaterialTheme.typography.headlineSmall,
+                                            color = CrispWhite
+                                        )
+                                    }
                                 }
                             )
                         },
                         bottomBar = {
-                            NavigationBar(containerColor = SlateSurface) {
+                            NavigationBar(containerColor = AnvilGunmetal) {
                                 NavigationBarItem(
                                     selected = selectedTab == MainTab.FORGE,
                                     onClick = { viewModel.selectTab(MainTab.FORGE) },
                                     icon = { Icon(Icons.Rounded.AutoAwesome, contentDescription = null) },
                                     label = { Text("Forge") },
                                     colors = NavigationBarItemDefaults.colors(
-                                        selectedIconColor = MasserCrimson,
-                                        selectedTextColor = MasserCrimson,
-                                        indicatorColor = SlateCard,
+                                        selectedIconColor = EmberFlame,
+                                        selectedTextColor = EmberFlame,
+                                        indicatorColor = FurnaceCard,
                                         unselectedIconColor = MutedSteel,
                                         unselectedTextColor = MutedSteel
                                     )
@@ -243,7 +268,10 @@ class MainActivity : ComponentActivity() {
                                         BadgedBox(
                                             badge = {
                                                 if (metrics.totalActiveJobs > 0) {
-                                                    Badge(containerColor = MasserCrimson) {
+                                                    Badge(
+                                                        containerColor = MasserCrimson,
+                                                        contentColor = ObsidianBg
+                                                    ) {
                                                         Text(metrics.totalActiveJobs.toString())
                                                     }
                                                 }
@@ -254,9 +282,9 @@ class MainActivity : ComponentActivity() {
                                     },
                                     label = { Text("Queue") },
                                     colors = NavigationBarItemDefaults.colors(
-                                        selectedIconColor = MasserCrimson,
-                                        selectedTextColor = MasserCrimson,
-                                        indicatorColor = SlateCard,
+                                        selectedIconColor = EmberFlame,
+                                        selectedTextColor = EmberFlame,
+                                        indicatorColor = FurnaceCard,
                                         unselectedIconColor = MutedSteel,
                                         unselectedTextColor = MutedSteel
                                     )
@@ -267,9 +295,9 @@ class MainActivity : ComponentActivity() {
                                     icon = { Icon(Icons.Rounded.Settings, contentDescription = null) },
                                     label = { Text("Settings") },
                                     colors = NavigationBarItemDefaults.colors(
-                                        selectedIconColor = MasserCrimson,
-                                        selectedTextColor = MasserCrimson,
-                                        indicatorColor = SlateCard,
+                                        selectedIconColor = EmberFlame,
+                                        selectedTextColor = EmberFlame,
+                                        indicatorColor = FurnaceCard,
                                         unselectedIconColor = MutedSteel,
                                         unselectedTextColor = MutedSteel
                                     )
@@ -295,6 +323,7 @@ class MainActivity : ComponentActivity() {
                                         jobs = jobs,
                                         metrics = metrics,
                                         settings = settings,
+                                        deviceCapabilities = deviceCapabilities,
                                         onUrlTextChange = viewModel::updateUrlBatchText,
                                         onPasteClick = viewModel::pasteUrlsFromClipboard,
                                         onToggleChipExpand = viewModel::toggleLinkChipExpanded,
@@ -333,6 +362,7 @@ class MainActivity : ComponentActivity() {
                                         isUpdatingYtDlp = isUpdatingYtDlp,
                                         cacheSizeBytes = cacheSizeBytes,
                                         appUpdateState = appUpdateState,
+                                        deviceCapabilities = deviceCapabilities,
                                         onCheckAppUpdate = viewModel::checkForAppUpdates,
                                         onStartAppUpdate = { viewModel.startAppUpdate(autoInstallAfter = true) },
                                         onCancelAppUpdate = viewModel::cancelAppUpdate,
@@ -418,8 +448,8 @@ private fun AppUpdateBanner(
 
     AnimatedVisibility(visible = visible) {
         Surface(
-            color = SlateCard,
-            border = BorderStroke(1.dp, MasserCrimson.copy(alpha = 0.55f)),
+            color = RelaySurface,
+            border = BorderStroke(1.dp, ArcRelayCyan.copy(alpha = 0.55f)),
             shape = RoundedCornerShape(14.dp),
             modifier = Modifier
                 .fillMaxWidth()
@@ -486,7 +516,7 @@ private fun AppUpdateBanner(
                             Button(
                                 onClick = onStartUpdate,
                                 contentPadding = PaddingValues(horizontal = 12.dp, vertical = 4.dp),
-                                colors = ButtonDefaults.buttonColors(containerColor = MasserCrimson, contentColor = CrispWhite)
+                                colors = ButtonDefaults.buttonColors(containerColor = ArcRelayCyan, contentColor = ObsidianBg)
                             ) {
                                 Text("Update", style = MaterialTheme.typography.labelMedium)
                             }
@@ -517,7 +547,7 @@ private fun AppUpdateBanner(
                             Button(
                                 onClick = onInstallNow,
                                 contentPadding = PaddingValues(horizontal = 12.dp, vertical = 4.dp),
-                                colors = ButtonDefaults.buttonColors(containerColor = EmeraldSuccess, contentColor = CrispWhite)
+                                colors = ButtonDefaults.buttonColors(containerColor = EmeraldSuccess, contentColor = ObsidianBg)
                             ) {
                                 Text(
                                     if (updateState.phase == AppUpdatePhase.NEEDS_INSTALL_PERMISSION) "Allow"
@@ -537,8 +567,8 @@ private fun AppUpdateBanner(
                             .fillMaxWidth()
                             .height(4.dp)
                             .clip(RoundedCornerShape(2.dp)),
-                        color = MasserCrimson,
-                        trackColor = SlateOutline
+                        color = ArcRelayCyan,
+                        trackColor = RelayBevelOutline
                     )
                 }
             }

@@ -114,8 +114,9 @@ class YtDlpEngine(private val binaryManager: NativeBinaryManager) {
             if (spec.embedThumbnail && spec.mode != DownloadMode.VIDEO_BEST_MKV) {
                 addOption("--embed-thumbnail")
             }
-            if (spec.sponsorBlock) {
-                addOption("--sponsorblock-remove", "sponsor")
+            val sponsorCategories = spec.effectiveSponsorBlockCategories
+            if (sponsorCategories.isNotEmpty()) {
+                addOption("--sponsorblock-remove", sponsorCategories.joinToString(",") { it.ytDlpKey })
             }
         }
 
