@@ -6,6 +6,7 @@ import androidx.datastore.preferences.core.Preferences
 import androidx.datastore.preferences.core.booleanPreferencesKey
 import androidx.datastore.preferences.core.edit
 import androidx.datastore.preferences.core.intPreferencesKey
+import androidx.datastore.preferences.core.longPreferencesKey
 import androidx.datastore.preferences.core.stringPreferencesKey
 import androidx.datastore.preferences.core.stringSetPreferencesKey
 import androidx.datastore.preferences.preferencesDataStore
@@ -45,6 +46,9 @@ data class ForgeSettings(
     val autoCheckAppUpdates: Boolean = true,
     val autoDownloadAppUpdates: Boolean = false,
     val dismissedUpdateTag: String = "",
+    val autoUpdateYtDlpOnLaunch: Boolean = true,
+    val ytDlpFirstRunUpdateDone: Boolean = false,
+    val lastYtDlpUpdateCheckMs: Long = 0L,
     val defaultSponsorBlockCategories: Set<SponsorBlockCategory> = emptySet(),
     val defaultSilenceSkip: SilenceSkipSpec = SilenceSkipSpec()
 )
@@ -82,6 +86,9 @@ class ForgeSettingsRepository(private val appContext: Context) {
             prefs[KEY_AUTO_CHECK_UPDATES] = next.autoCheckAppUpdates
             prefs[KEY_AUTO_DOWNLOAD_UPDATES] = next.autoDownloadAppUpdates
             prefs[KEY_DISMISSED_UPDATE_TAG] = next.dismissedUpdateTag
+            prefs[KEY_AUTO_UPDATE_YTDLP] = next.autoUpdateYtDlpOnLaunch
+            prefs[KEY_YTDLP_FIRST_RUN_DONE] = next.ytDlpFirstRunUpdateDone
+            prefs[KEY_LAST_YTDLP_CHECK_MS] = next.lastYtDlpUpdateCheckMs
             prefs[KEY_DEFAULT_SB_CATEGORIES] = next.defaultSponsorBlockCategories.map { it.name }.toSet()
             prefs[KEY_DEFAULT_SILENCE_ENABLED] = next.defaultSilenceSkip.enabled
             prefs[KEY_DEFAULT_SILENCE_DB] = next.defaultSilenceSkip.thresholdDb.coerceIn(-90, -10)
@@ -125,6 +132,9 @@ class ForgeSettingsRepository(private val appContext: Context) {
             autoCheckAppUpdates = prefs[KEY_AUTO_CHECK_UPDATES] ?: true,
             autoDownloadAppUpdates = prefs[KEY_AUTO_DOWNLOAD_UPDATES] ?: false,
             dismissedUpdateTag = prefs[KEY_DISMISSED_UPDATE_TAG].orEmpty(),
+            autoUpdateYtDlpOnLaunch = prefs[KEY_AUTO_UPDATE_YTDLP] ?: true,
+            ytDlpFirstRunUpdateDone = prefs[KEY_YTDLP_FIRST_RUN_DONE] ?: false,
+            lastYtDlpUpdateCheckMs = prefs[KEY_LAST_YTDLP_CHECK_MS] ?: 0L,
             defaultSponsorBlockCategories = sbCategories,
             defaultSilenceSkip = SilenceSkipSpec(
                 enabled = prefs[KEY_DEFAULT_SILENCE_ENABLED] ?: false,
@@ -160,6 +170,9 @@ class ForgeSettingsRepository(private val appContext: Context) {
         private val KEY_AUTO_CHECK_UPDATES = booleanPreferencesKey("auto_check_app_updates")
         private val KEY_AUTO_DOWNLOAD_UPDATES = booleanPreferencesKey("auto_download_app_updates")
         private val KEY_DISMISSED_UPDATE_TAG = stringPreferencesKey("dismissed_update_tag")
+        private val KEY_AUTO_UPDATE_YTDLP = booleanPreferencesKey("auto_update_ytdlp_launch")
+        private val KEY_YTDLP_FIRST_RUN_DONE = booleanPreferencesKey("ytdlp_first_run_update_done")
+        private val KEY_LAST_YTDLP_CHECK_MS = longPreferencesKey("last_ytdlp_update_check_ms")
         private val KEY_DEFAULT_SB_CATEGORIES = stringSetPreferencesKey("default_sb_categories")
         private val KEY_DEFAULT_SILENCE_ENABLED = booleanPreferencesKey("default_silence_enabled")
         private val KEY_DEFAULT_SILENCE_DB = intPreferencesKey("default_silence_db")

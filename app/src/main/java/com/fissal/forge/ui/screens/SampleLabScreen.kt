@@ -226,6 +226,7 @@ fun SampleLabScreen(
     onVoteCandidate: (candidateId: String, SampleVoteState) -> Unit,
     onUseConfigInStudio: (candidateId: String) -> Unit,
     onClose: () -> Unit,
+    workflowDock: @Composable () -> Unit = {},
     modifier: Modifier = Modifier
 ) {
     BackHandler(onBack = onClose)
@@ -288,14 +289,20 @@ fun SampleLabScreen(
             )
         }
     ) { innerPadding ->
-        LazyColumn(
+        Column(
             modifier = Modifier
                 .fillMaxSize()
                 .padding(innerPadding)
-                .imePadding(),
-            contentPadding = PaddingValues(14.dp),
-            verticalArrangement = Arrangement.spacedBy(12.dp)
+                .imePadding()
         ) {
+            workflowDock()
+            LazyColumn(
+                modifier = Modifier
+                    .weight(1f)
+                    .fillMaxWidth(),
+                contentPadding = PaddingValues(14.dp),
+                verticalArrangement = Arrangement.spacedBy(12.dp)
+            ) {
             // Section 1 — Target Media Header
             item(key = "section_target_header") {
                 TargetMediaHeaderCard(
@@ -419,6 +426,7 @@ fun SampleLabScreen(
                     }
                     Spacer(Modifier.height(12.dp))
                 }
+            }
             }
         }
     }

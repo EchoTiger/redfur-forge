@@ -41,7 +41,7 @@ object UrlBatchParser {
             val rawUrl = match.value.trimEnd(*TRAILING_PUNCTUATION)
             if (rawUrl.length < 10) continue
 
-            val cleanUrl = if (stripTracking) stripTrackingParams(rawUrl) else rawUrl
+            val cleanUrl = normalizeUrl(rawUrl, stripTracking)
             if (!seen.add(cleanUrl)) continue
 
             val parsedUri = runCatching { URI(cleanUrl) }.getOrNull()
@@ -61,6 +61,47 @@ object UrlBatchParser {
         }
         return results
     }
+
+    /**
+     * Removes any occurrence of [targetCleanUrl] from [rawText] once resolved, leaving other
+     * pending URLs or surrounding lines intact, and collapsing newly emptied lines.
+     */
+    fun removeResolvedUrlFromText(
+        rawText: String,
+        targetCleanUrl: String,
+        stripTracking: Boolean
+    ): String {
+        if (rawText.isBlank() || targetCleanUrl.isBlank()) return rawText
+
+        val out = StringBuilder(rawText.length)
+        var cursor = 0
+        var removedAny = false
+
+        for (match in URL_REGEX.findAll(rawText)) {
+            val rawUrl = match.value.trimEnd(*TRAILING_PUNCTUATION)
+            if (rawUrl.length < 10) continue
+            val cleanUrl = normalizeUrl(rawUrl, stripTracking)
+            if (cleanUrl == targetCleanUrl) {
+                removedAny = true
+                out.append(rawText, cursor, match.range.first)
+                // Advance past the URL itself plus any attached trailing punctuation belonging to that match
+                cursor = match.range.last + 1
+            }
+        }
+        if (!removedAny) return rawText
+        out.append(rawText, cursor, rawText.length)
+
+        val cleanedLines = out.toString()
+            .lines()
+            .mapNotNull { line ->
+                val trimmed = line.trim()
+                if (trimmed.isEmpty()) null else line.trimEnd()
+            }
+        return if (cleanedLines.isEmpty()) "" else cleanedLines.joinToString("\n")
+    }
+
+    private fun normalizeUrl(rawUrl: String, stripTracking: Boolean): String =
+        if (stripTracking) stripTrackingParams(rawUrl) else rawUrl
 
     private fun stripTrackingParams(url: String): String {
         val hashSplit = url.split("#", limit = 2)

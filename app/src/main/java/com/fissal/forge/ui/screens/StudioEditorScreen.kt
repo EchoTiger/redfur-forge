@@ -1,6 +1,11 @@
 package com.fissal.forge.ui.screens
 
 import androidx.activity.compose.BackHandler
+import androidx.compose.animation.AnimatedVisibility
+import androidx.compose.animation.expandVertically
+import androidx.compose.animation.fadeIn
+import androidx.compose.animation.fadeOut
+import androidx.compose.animation.shrinkVertically
 import androidx.compose.foundation.BorderStroke
 import androidx.compose.foundation.Image
 import androidx.compose.foundation.background
@@ -41,6 +46,7 @@ import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.FilterChip
 import androidx.compose.material3.FilterChipDefaults
+import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.LinearProgressIndicator
@@ -62,13 +68,13 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.asImageBitmap
+import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.input.KeyboardType
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import com.fissal.forge.data.local.ForgeJobEntity
-import com.fissal.forge.data.local.FormatPresetEntity
 import com.fissal.forge.data.local.JobStatus
 import com.fissal.forge.domain.logic.AspectRatioSnapper
 import com.fissal.forge.domain.logic.BitrateBudgetCalculator
@@ -95,6 +101,7 @@ import com.fissal.forge.ui.components.ForgeInfoTipButton
 import com.fissal.forge.ui.components.ForgePrimaryButton
 import com.fissal.forge.ui.components.LiveSizeEstimateBadge
 import com.fissal.forge.ui.components.SilenceSkipControlPanel
+import com.fissal.forge.ui.components.TrimRangePreviewPlayer
 import com.fissal.forge.ui.components.WorkshopDomainCard
 import com.fissal.forge.ui.theme.AnvilGunmetal
 import com.fissal.forge.ui.theme.ArcRelayCyan
@@ -105,7 +112,6 @@ import com.fissal.forge.ui.theme.EmeraldSuccess
 import com.fissal.forge.ui.theme.ForgeBevelOutline
 import com.fissal.forge.ui.theme.ForgeGold
 import com.fissal.forge.ui.theme.FurnaceCard
-import com.fissal.forge.ui.theme.MasserCrimson
 import com.fissal.forge.ui.theme.MoltenEmber
 import com.fissal.forge.ui.theme.MutedSteel
 import com.fissal.forge.ui.theme.ObsidianBg
@@ -114,6 +120,7 @@ import com.fissal.forge.ui.theme.SecundaSilver
 import com.fissal.forge.ui.theme.SlateCard
 import com.fissal.forge.ui.theme.SlateOutline
 import com.fissal.forge.ui.theme.VolcanicObsidian
+import java.util.Locale
 import kotlin.math.roundToInt
 import kotlin.math.roundToLong
 
@@ -124,17 +131,17 @@ private val SampleActiveBadgeBg = Color(0xFFC43419)
 fun StudioEditorScreen(
     state: StudioSessionState,
     jobs: List<ForgeJobEntity>,
-    presets: List<FormatPresetEntity>,
+    presets: List<com.fissal.forge.data.local.FormatPresetEntity>,
     deviceCapabilities: DeviceCapabilityReport,
     buildSpecForItem: (probe: MediaProbeResult, cfg: StudioItemConfig, forceCompressSpec: Boolean) -> PipelineSpec,
     onUpdate: ((StudioItemConfig) -> StudioItemConfig) -> Unit,
-    onSelectTab: (StudioToolTab) -> Unit,
+    onToggleSection: (StudioToolTab, Boolean) -> Unit,
     onToggleSamplePreview: () -> Unit,
     onOpenSampleLab: () -> Unit,
-    onApplyPreset: (FormatPresetEntity) -> Unit,
+    onApplyPreset: (com.fissal.forge.data.local.FormatPresetEntity) -> Unit,
     onOpenSavePresetDialog: (suggestedName: String, spec: PipelineSpec) -> Unit,
-    onTogglePresetDefault: (FormatPresetEntity) -> Unit,
-    onDeletePreset: (FormatPresetEntity) -> Unit,
+    onTogglePresetDefault: (com.fissal.forge.data.local.FormatPresetEntity) -> Unit,
+    onDeletePreset: (com.fissal.forge.data.local.FormatPresetEntity) -> Unit,
     onClearInlineWatch: () -> Unit,
     onSelectBatchItem: (Int) -> Unit,
     onApplySameType: () -> Unit,
@@ -142,18 +149,11 @@ fun StudioEditorScreen(
     onSelectCropPreset: (AspectPreset) -> Unit,
     onExecute: (saveToDevice: Boolean, copyToClipboard: Boolean) -> Unit,
     onRunInBackground: () -> Unit,
-    onClose: () -> Unit
+    onClose: () -> Unit,
+    workflowDock: @Composable () -> Unit = {}
 ) {
     BackHandler(onBack = onClose)
     val primary = state.primaryItem
-    val availableTabs = remember(primary.mediaKind) {
-        buildList {
-            add(StudioToolTab.CONVERT)
-            add(StudioToolTab.COMPRESS)
-            if (primary.isTimeBased) add(StudioToolTab.TRIM)
-            if (primary.isVisual) add(StudioToolTab.CROP)
-        }
-    }
 
     val activeSpec = remember(primary, state.activeConfig) {
         buildSpecForItem(primary, state.activeConfig, false)
@@ -203,7 +203,6 @@ fun StudioEditorScreen(
         }
     }
 
-    // Inline quick completion watch sheet for Share -> Copy / Save & Copy workflows
     val watchedJob = if (state.inlineWatchJobIds.isNotEmpty()) {
         jobs.firstOrNull { it.id == state.inlineWatchJobIds.first() }
     } else {
@@ -222,14 +221,14 @@ fun StudioEditorScreen(
                             horizontalArrangement = Arrangement.spacedBy(8.dp)
                         ) {
                             Text(
-                                text = if (state.isBatch) "Batch Studio (${state.items.size} files)" else "Quick Forge Studio",
+                                text = if (state.isBatch) "Batch Studio (${state.items.size} files)" else "Forge Studio",
                                 style = MaterialTheme.typography.titleMedium,
                                 color = CrispWhite
                             )
-                            DomainRolePill(domain = EngineDomain.FORGE, label = "Forge")
+                            DomainRolePill(domain = EngineDomain.FORGE, label = "Local Editor")
                         }
                         Text(
-                            text = if (state.cameFromShareIntent) "Opened from Android Share Menu" else primary.displayName,
+                            text = if (state.cameFromShareIntent) "Shared from another app" else primary.displayName,
                             style = MaterialTheme.typography.bodySmall,
                             color = MutedSteel,
                             maxLines = 1,
@@ -239,7 +238,7 @@ fun StudioEditorScreen(
                 },
                 navigationIcon = {
                     IconButton(onClick = onClose) {
-                        Icon(Icons.Rounded.Close, contentDescription = "Close Studio", tint = CrispWhite)
+                        Icon(Icons.Rounded.Close, contentDescription = "Close Forge Studio", tint = CrispWhite)
                     }
                 }
             )
@@ -289,7 +288,7 @@ fun StudioEditorScreen(
                         ) {
                             Icon(Icons.Rounded.ContentCopy, contentDescription = null, modifier = Modifier.size(16.dp), tint = SecundaSilver)
                             Spacer(Modifier.width(4.dp))
-                            Text("Copy Only", maxLines = 1, color = CrispWhite)
+                            Text("Copy Clip", maxLines = 1, color = CrispWhite)
                         }
 
                         OutlinedButton(
@@ -314,432 +313,460 @@ fun StudioEditorScreen(
             }
         }
     ) { innerPadding ->
-        Box(
+        Column(
             modifier = Modifier
                 .fillMaxSize()
                 .padding(innerPadding)
         ) {
-            Column(
-                modifier = Modifier
-                    .fillMaxSize()
-                    .verticalScroll(rememberScrollState())
-                    .padding(14.dp),
-                verticalArrangement = Arrangement.spacedBy(12.dp)
-            ) {
-                // Detected Media Summary Header Card (Molten Forge)
-                WorkshopDomainCard(
-                    domain = EngineDomain.FORGE,
-                    isActive = false,
-                    shape = RoundedCornerShape(16.dp),
-                    contentPadding = PaddingValues(12.dp)
+            workflowDock()
+
+            Box(modifier = Modifier.weight(1f)) {
+                Column(
+                    modifier = Modifier
+                        .fillMaxSize()
+                        .verticalScroll(rememberScrollState())
+                        .padding(14.dp),
+                    verticalArrangement = Arrangement.spacedBy(12.dp)
                 ) {
-                    Row(
-                        verticalAlignment = Alignment.CenterVertically,
-                        horizontalArrangement = Arrangement.spacedBy(12.dp)
+                    // Detected Media Summary Header Card
+                    WorkshopDomainCard(
+                        domain = EngineDomain.FORGE,
+                        isActive = false,
+                        shape = RoundedCornerShape(16.dp),
+                        contentPadding = PaddingValues(12.dp)
                     ) {
-                        Box(
-                            modifier = Modifier
-                                .size(72.dp)
-                                .clip(RoundedCornerShape(10.dp))
-                                .background(VolcanicObsidian),
-                            contentAlignment = Alignment.Center
+                        Row(
+                            verticalAlignment = Alignment.CenterVertically,
+                            horizontalArrangement = Arrangement.spacedBy(12.dp)
                         ) {
-                            when {
-                                state.isLoadingPreview -> CircularProgressIndicator(
-                                    color = EmberFlame,
-                                    modifier = Modifier.size(24.dp),
-                                    strokeWidth = 2.5.dp
+                            Box(
+                                modifier = Modifier
+                                    .size(72.dp)
+                                    .clip(RoundedCornerShape(10.dp))
+                                    .background(VolcanicObsidian),
+                                contentAlignment = Alignment.Center
+                            ) {
+                                when {
+                                    state.isLoadingPreview -> CircularProgressIndicator(
+                                        color = EmberFlame,
+                                        modifier = Modifier.size(24.dp),
+                                        strokeWidth = 2.5.dp
+                                    )
+                                    state.previewBitmap != null && !state.previewBitmap.isRecycled -> Image(
+                                        bitmap = state.previewBitmap.asImageBitmap(),
+                                        contentDescription = "Media preview",
+                                        contentScale = ContentScale.Crop,
+                                        modifier = Modifier.fillMaxSize()
+                                    )
+                                    else -> Text(
+                                        text = primary.extension.uppercase().ifBlank { primary.mediaKind.name },
+                                        style = MaterialTheme.typography.labelMedium,
+                                        color = SecundaSilver
+                                    )
+                                }
+                            }
+
+                            Column(modifier = Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(4.dp)) {
+                                Text(
+                                    text = primary.displayName,
+                                    style = MaterialTheme.typography.titleSmall,
+                                    color = CrispWhite,
+                                    maxLines = 1,
+                                    overflow = TextOverflow.Ellipsis
                                 )
-                                state.previewBitmap != null && !state.previewBitmap.isRecycled -> Image(
-                                    bitmap = state.previewBitmap.asImageBitmap(),
-                                    contentDescription = "Preview",
-                                    contentScale = ContentScale.Crop,
-                                    modifier = Modifier.fillMaxSize()
-                                )
-                                else -> Text(
-                                    text = primary.extension.uppercase().ifBlank { primary.mediaKind.name },
-                                    style = MaterialTheme.typography.labelMedium,
+                                val metaParts = buildList {
+                                    add(if (primary.mediaKind == MediaKind.CAMERA_RAW) "RAW (${primary.extension.uppercase()})" else primary.extension.uppercase())
+                                    if (primary.effectiveWidth > 0) add(primary.displayResolution())
+                                    if (primary.durationMs > 0L) add(primary.formattedDuration())
+                                    add(primary.formattedSize())
+                                }
+                                Text(
+                                    text = metaParts.joinToString(" • "),
+                                    style = MaterialTheme.typography.bodySmall,
                                     color = SecundaSilver
                                 )
-                            }
-                        }
-
-                        Column(modifier = Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(4.dp)) {
-                            Text(
-                                text = primary.displayName,
-                                style = MaterialTheme.typography.titleSmall,
-                                color = CrispWhite,
-                                maxLines = 1,
-                                overflow = TextOverflow.Ellipsis
-                            )
-                            val metaParts = buildList {
-                                add(if (primary.mediaKind == MediaKind.CAMERA_RAW) "RAW (${primary.extension.uppercase()})" else primary.extension.uppercase())
-                                if (primary.effectiveWidth > 0) add(primary.displayResolution())
-                                if (primary.durationMs > 0L) add(primary.formattedDuration())
-                                add(primary.formattedSize())
-                            }
-                            Text(
-                                text = metaParts.joinToString(" • "),
-                                style = MaterialTheme.typography.bodySmall,
-                                color = SecundaSilver
-                            )
-                            Row(
-                                verticalAlignment = Alignment.CenterVertically,
-                                horizontalArrangement = Arrangement.spacedBy(8.dp)
-                            ) {
-                                LiveSizeEstimateBadge(
-                                    estimate = activeEstimate,
-                                    domain = EngineDomain.FORGE,
-                                    prefix = "Out"
-                                )
-                                if (primary.cameraModel != null) {
-                                    Text(
-                                        text = primary.cameraModel,
-                                        style = MaterialTheme.typography.labelSmall,
-                                        color = MutedSteel,
-                                        maxLines = 1,
-                                        overflow = TextOverflow.Ellipsis
+                                Row(
+                                    verticalAlignment = Alignment.CenterVertically,
+                                    horizontalArrangement = Arrangement.spacedBy(8.dp)
+                                ) {
+                                    LiveSizeEstimateBadge(
+                                        estimate = activeEstimate,
+                                        domain = EngineDomain.FORGE,
+                                        prefix = "Out"
                                     )
-                                }
-                            }
-                        }
-                    }
-                }
-
-                if (state.isBatch) {
-                    Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
-                        Text(
-                            text = "Batch Queue (${state.selectedItemIndex + 1}/${state.items.size}) — customize individually or propagate",
-                            style = MaterialTheme.typography.labelSmall,
-                            color = SecundaSilver
-                        )
-                        FlowRow(
-                            horizontalArrangement = Arrangement.spacedBy(6.dp),
-                            verticalArrangement = Arrangement.spacedBy(6.dp)
-                        ) {
-                            state.items.forEachIndexed { idx, item ->
-                                FilterChip(
-                                    selected = idx == state.selectedItemIndex,
-                                    onClick = { onSelectBatchItem(idx) },
-                                    label = {
+                                    if (primary.cameraModel != null) {
                                         Text(
-                                            text = "${idx + 1}. ${item.displayName.take(18)}",
-                                            maxLines = 1
+                                            text = primary.cameraModel,
+                                            style = MaterialTheme.typography.labelSmall,
+                                            color = MutedSteel,
+                                            maxLines = 1,
+                                            overflow = TextOverflow.Ellipsis
                                         )
                                     }
-                                )
+                                }
                             }
                         }
-                        FlowRow(
-                            horizontalArrangement = Arrangement.spacedBy(8.dp),
-                            verticalArrangement = Arrangement.spacedBy(6.dp)
-                        ) {
-                            FilterChip(
-                                selected = false,
-                                onClick = onApplySameType,
-                                label = { Text("Apply to All ${primary.mediaKind.name.lowercase()}") }
-                            )
-                            FilterChip(
-                                selected = false,
-                                onClick = onApplyAll,
-                                label = { Text("Apply to All Files") }
-                            )
-                        }
                     }
-                }
 
-                if (primary.isVisual) {
-                    OutlinedButton(
-                        onClick = onOpenSampleLab,
-                        shape = RoundedCornerShape(14.dp),
-                        border = BorderStroke(1.dp, EmberFlame.copy(alpha = 0.72f)),
-                        contentPadding = PaddingValues(horizontal = 14.dp, vertical = 10.dp),
-                        modifier = Modifier.fillMaxWidth()
-                    ) {
-                        Icon(
-                            imageVector = Icons.Rounded.Compare,
-                            contentDescription = null,
-                            tint = EmberFlame,
-                            modifier = Modifier.size(18.dp)
-                        )
-                        Spacer(Modifier.width(8.dp))
-                        Text(
-                            text = "Open Sample Frame Lab (Multi-Config Compare)",
-                            style = MaterialTheme.typography.labelLarge,
-                            color = CrispWhite
-                        )
-                    }
-                }
-
-                EmojiPresetStrip(
-                    mediaKind = primary.mediaKind,
-                    presets = presets,
-                    onApplyPreset = onApplyPreset,
-                    onSaveCurrentAsPreset = {
-                        val defaultTitle = if (activeSpec.compress?.mode == CompressMode.TARGET_BYTES &&
-                            activeSpec.compress.targetBytes != null
-                        ) {
-                            "${state.targetExtension.uppercase()} ≤ ${state.targetMbText}MB"
-                        } else {
-                            "${state.targetExtension.uppercase()} Custom"
-                        }
-                        onOpenSavePresetDialog(defaultTitle, activeSpec)
-                    },
-                    onToggleDefaultForKind = onTogglePresetDefault,
-                    onDeletePreset = onDeletePreset,
-                    actionLabel = "Save Emoji Preset"
-                )
-
-                // Combinable 4-Tool Selector Chips
-                FlowRow(
-                    horizontalArrangement = Arrangement.spacedBy(8.dp),
-                    verticalArrangement = Arrangement.spacedBy(8.dp)
-                ) {
-                    availableTabs.forEach { tab ->
-                        val isEnabled = when (tab) {
-                            StudioToolTab.CONVERT -> state.convertEnabled
-                            StudioToolTab.COMPRESS -> state.compressEnabled
-                            StudioToolTab.TRIM -> state.trimEnabled
-                            StudioToolTab.CROP -> state.cropEnabled
-                        }
-                        val isSelected = state.activeTab == tab
-                        val icon = when (tab) {
-                            StudioToolTab.CONVERT -> Icons.Rounded.Transform
-                            StudioToolTab.COMPRESS -> Icons.Rounded.Compress
-                            StudioToolTab.TRIM -> Icons.Rounded.ContentCut
-                            StudioToolTab.CROP -> Icons.Rounded.Crop
-                        }
-                        val label = when (tab) {
-                            StudioToolTab.CONVERT -> "Convert"
-                            StudioToolTab.COMPRESS -> "Compress"
-                            StudioToolTab.TRIM -> "Trim"
-                            StudioToolTab.CROP -> "Crop"
-                        }
-
-                        Surface(
-                            color = if (isSelected) FurnaceCard else AnvilGunmetal,
-                            shape = RoundedCornerShape(12.dp),
-                            border = BorderStroke(
-                                width = if (isSelected) 1.5.dp else 1.dp,
-                                color = when {
-                                    isSelected -> EmberFlame
-                                    isEnabled -> EmeraldSuccess.copy(alpha = 0.65f)
-                                    else -> ForgeBevelOutline
-                                }
-                            ),
-                            modifier = Modifier.clickable { onSelectTab(tab) }
-                        ) {
-                            Row(
-                                modifier = Modifier.padding(horizontal = 12.dp, vertical = 9.dp),
-                                verticalAlignment = Alignment.CenterVertically,
-                                horizontalArrangement = Arrangement.spacedBy(6.dp)
+                    if (state.isBatch) {
+                        Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                            Text(
+                                text = "Batch Queue (${state.selectedItemIndex + 1}/${state.items.size}) — customize individually or copy across files",
+                                style = MaterialTheme.typography.labelSmall,
+                                color = SecundaSilver
+                            )
+                            FlowRow(
+                                horizontalArrangement = Arrangement.spacedBy(6.dp),
+                                verticalArrangement = Arrangement.spacedBy(6.dp)
                             ) {
-                                Icon(
-                                    imageVector = icon,
-                                    contentDescription = null,
-                                    tint = if (isSelected) EmberFlame else SecundaSilver,
-                                    modifier = Modifier.size(16.dp)
-                                )
-                                Text(label, style = MaterialTheme.typography.labelMedium, color = CrispWhite)
-                                if (isEnabled) {
-                                    Box(
-                                        modifier = Modifier
-                                            .size(7.dp)
-                                            .clip(CircleShape)
-                                            .background(EmeraldSuccess)
+                                state.items.forEachIndexed { idx, item ->
+                                    FilterChip(
+                                        selected = idx == state.selectedItemIndex,
+                                        onClick = { onSelectBatchItem(idx) },
+                                        label = {
+                                            Text(
+                                                text = "${idx + 1}. ${item.displayName.take(18)}",
+                                                maxLines = 1
+                                            )
+                                        }
                                     )
                                 }
                             }
+                            FlowRow(
+                                horizontalArrangement = Arrangement.spacedBy(8.dp),
+                                verticalArrangement = Arrangement.spacedBy(6.dp)
+                            ) {
+                                FilterChip(
+                                    selected = false,
+                                    onClick = onApplySameType,
+                                    label = { Text("Apply to All ${primary.mediaKind.name.lowercase()}") }
+                                )
+                                FilterChip(
+                                    selected = false,
+                                    onClick = onApplyAll,
+                                    label = { Text("Apply to All Files") }
+                                )
+                            }
                         }
                     }
-                }
 
-                // Active Tool Editor Card (Molten Forge)
-                WorkshopDomainCard(
-                    domain = EngineDomain.FORGE,
-                    isActive = false,
-                    shape = RoundedCornerShape(16.dp),
-                    contentPadding = PaddingValues(14.dp)
-                ) {
-                    Column(
-                        verticalArrangement = Arrangement.spacedBy(12.dp)
+                    if (primary.isVisual) {
+                        OutlinedButton(
+                            onClick = onOpenSampleLab,
+                            shape = RoundedCornerShape(14.dp),
+                            border = BorderStroke(1.dp, EmberFlame.copy(alpha = 0.72f)),
+                            contentPadding = PaddingValues(horizontal = 14.dp, vertical = 10.dp),
+                            modifier = Modifier.fillMaxWidth()
+                        ) {
+                            Icon(
+                                imageVector = Icons.Rounded.Compare,
+                                contentDescription = null,
+                                tint = EmberFlame,
+                                modifier = Modifier.size(18.dp)
+                            )
+                            Spacer(Modifier.width(8.dp))
+                            Text(
+                                text = "Compare in Sample Frame Lab",
+                                style = MaterialTheme.typography.labelLarge,
+                                color = CrispWhite
+                            )
+                        }
+                    }
+
+                    EmojiPresetStrip(
+                        mediaKind = primary.mediaKind,
+                        presets = presets,
+                        onApplyPreset = onApplyPreset,
+                        onSaveCurrentAsPreset = {
+                            val defaultTitle = if (activeSpec.compress?.mode == CompressMode.TARGET_BYTES &&
+                                activeSpec.compress.targetBytes != null
+                            ) {
+                                "${state.targetExtension.uppercase()} ≤ ${state.targetMbText}MB"
+                            } else {
+                                "${state.targetExtension.uppercase()} Custom"
+                            }
+                            onOpenSavePresetDialog(defaultTitle, activeSpec)
+                        },
+                        onToggleDefaultForKind = onTogglePresetDefault,
+                        onDeletePreset = onDeletePreset,
+                        actionLabel = "Save Preset"
+                    )
+
+                    // Active Stages Overview Strip (quick tap toggles)
+                    val convertActive = state.convertEnabled || primary.mediaKind == MediaKind.CAMERA_RAW
+                    FlowRow(
+                        horizontalArrangement = Arrangement.spacedBy(8.dp),
+                        verticalArrangement = Arrangement.spacedBy(8.dp)
+                    ) {
+                        StageQuickPill(
+                            label = if (primary.mediaKind == MediaKind.CAMERA_RAW) "Convert (Required)" else "Convert",
+                            icon = Icons.Rounded.Transform,
+                            enabled = convertActive,
+                            lockedOn = primary.mediaKind == MediaKind.CAMERA_RAW,
+                            onClick = { onToggleSection(StudioToolTab.CONVERT, !state.convertEnabled) }
+                        )
+                        StageQuickPill(
+                            label = "Compress",
+                            icon = Icons.Rounded.Compress,
+                            enabled = state.compressEnabled,
+                            onClick = { onToggleSection(StudioToolTab.COMPRESS, !state.compressEnabled) }
+                        )
+                        if (primary.isTimeBased) {
+                            StageQuickPill(
+                                label = "Trim & Audio",
+                                icon = Icons.Rounded.ContentCut,
+                                enabled = state.trimEnabled,
+                                onClick = { onToggleSection(StudioToolTab.TRIM, !state.trimEnabled) }
+                            )
+                        }
+                        if (primary.isVisual) {
+                            StageQuickPill(
+                                label = "Crop",
+                                icon = Icons.Rounded.Crop,
+                                enabled = state.cropEnabled,
+                                onClick = { onToggleSection(StudioToolTab.CROP, !state.cropEnabled) }
+                            )
+                        }
+                    }
+
+                    // 1. Collapsible Convert Format Card
+                    CollapsibleStudioSectionCard(
+                        title = "Convert Format",
+                        icon = Icons.Rounded.Transform,
+                        isEnabled = convertActive,
+                        switchEnabled = primary.mediaKind != MediaKind.CAMERA_RAW,
+                        statusSummary = if (convertActive) {
+                            val codecPart = if (primary.mediaKind == MediaKind.VIDEO && state.targetExtension in setOf("mp4", "mkv", "mov")) {
+                                " (${state.videoCodec.label})"
+                            } else {
+                                ""
+                            }
+                            "Active • Output ${state.targetExtension.uppercase()}$codecPart"
+                        } else {
+                            "Off — original ${primary.extension.uppercase().ifBlank { "file" }} format will be kept"
+                        },
+                        onToggleEnabled = { checked -> onToggleSection(StudioToolTab.CONVERT, checked) }
+                    ) {
+                        ConvertPanelBody(state = state, deviceCapabilities = deviceCapabilities, onUpdate = onUpdate)
+                    }
+
+                    // 2. Collapsible Compress & Reduce Size Card
+                    CollapsibleStudioSectionCard(
+                        title = "Compress & Reduce Size",
+                        icon = Icons.Rounded.Compress,
+                        isEnabled = state.compressEnabled,
+                        statusSummary = if (state.compressEnabled) {
+                            if (state.compressMode == CompressMode.TARGET_BYTES) {
+                                "Active • Target ≤ ${state.targetMbText.ifBlank { "8" }} MB"
+                            } else if (primary.mediaKind == MediaKind.IMAGE || primary.mediaKind == MediaKind.CAMERA_RAW) {
+                                "Active • Quality ${state.imageQuality}%"
+                            } else {
+                                "Active • Video CRF ${state.videoCrf}"
+                            }
+                        } else {
+                            "Off — original file size and quality will be kept"
+                        },
+                        onToggleEnabled = { checked -> onToggleSection(StudioToolTab.COMPRESS, checked) }
+                    ) {
+                        CompressPanelBody(
+                            state = state,
+                            previewEstimate = compressPreviewEstimate,
+                            deviceCapabilities = deviceCapabilities,
+                            onToggleSamplePreview = onToggleSamplePreview,
+                            onOpenSampleLab = onOpenSampleLab,
+                            onUpdate = onUpdate
+                        )
+                    }
+
+                    // 3. Collapsible Trim & Audio Card (Video / Audio)
+                    if (primary.isTimeBased) {
+                        val totalMs = primary.durationMs.coerceAtLeast(1000L)
+                        val startMs = state.trimStartMs.coerceIn(0L, totalMs - 500L)
+                        val endMs = state.trimEndMs.takeIf { it > startMs }?.coerceAtMost(totalMs) ?: totalMs
+                        CollapsibleStudioSectionCard(
+                            title = "Trim & Audio",
+                            icon = Icons.Rounded.ContentCut,
+                            isEnabled = state.trimEnabled,
+                            statusSummary = if (state.trimEnabled) {
+                                "Active • ${formatMs(startMs)} → ${formatMs(endMs)} (${formatMs(endMs - startMs)})"
+                            } else {
+                                "Off — full ${primary.formattedDuration().ifBlank { "media" }} clip and audio will be kept"
+                            },
+                            onToggleEnabled = { checked -> onToggleSection(StudioToolTab.TRIM, checked) }
+                        ) {
+                            TrimPanelBody(state = state, deviceCapabilities = deviceCapabilities, onUpdate = onUpdate)
+                        }
+                    }
+
+                    // 4. Collapsible Crop & Aspect Ratio Card (Visual media)
+                    if (primary.isVisual) {
+                        CollapsibleStudioSectionCard(
+                            title = "Crop & Aspect Ratio",
+                            icon = Icons.Rounded.Crop,
+                            isEnabled = state.cropEnabled,
+                            statusSummary = if (state.cropEnabled) {
+                                "Active • ${state.cropPreset.label} framing"
+                            } else {
+                                "Off — original framing will be kept"
+                            },
+                            onToggleEnabled = { checked -> onToggleSection(StudioToolTab.CROP, checked) }
+                        ) {
+                            CropPanelBody(state = state, onUpdate = onUpdate, onSelectCropPreset = onSelectCropPreset)
+                        }
+                    }
+
+                    // Privacy & Metadata Strip
+                    WorkshopDomainCard(
+                        domain = EngineDomain.DELIVERY,
+                        isActive = false,
+                        shape = RoundedCornerShape(14.dp),
+                        contentPadding = PaddingValues(horizontal = 14.dp, vertical = 10.dp)
                     ) {
                         Row(
                             modifier = Modifier.fillMaxWidth(),
                             horizontalArrangement = Arrangement.SpaceBetween,
                             verticalAlignment = Alignment.CenterVertically
                         ) {
-                            DomainRolePill(
-                                domain = EngineDomain.FORGE,
-                                label = "Forge • ${state.activeTab.name}"
+                            Column(modifier = Modifier.weight(1f)) {
+                                Text(
+                                    text = "Strip Location & Device Metadata",
+                                    style = MaterialTheme.typography.bodyMedium,
+                                    color = CrispWhite
+                                )
+                                Text(
+                                    text = "Removes EXIF, GPS, and camera info before saving or copying",
+                                    style = MaterialTheme.typography.labelSmall,
+                                    color = MutedSteel
+                                )
+                            }
+                            ForgeInfoTipButton(
+                                topic = SettingTopic.STRIP_METADATA,
+                                capabilityReport = deviceCapabilities
                             )
-                            LiveSizeEstimateBadge(
-                                estimate = if (state.activeTab == StudioToolTab.COMPRESS) {
-                                    compressPreviewEstimate
-                                } else {
-                                    activeEstimate
-                                },
-                                domain = EngineDomain.FORGE,
-                                prefix = "Est."
+                            Spacer(Modifier.width(6.dp))
+                            Switch(
+                                checked = state.stripMetadata,
+                                onCheckedChange = { checked -> onUpdate { it.copy(stripMetadata = checked) } }
                             )
-                        }
-
-                        when (state.activeTab) {
-                            StudioToolTab.CONVERT -> ConvertPanel(state, deviceCapabilities, onUpdate)
-                            StudioToolTab.COMPRESS -> CompressPanel(
-                                state = state,
-                                previewEstimate = compressPreviewEstimate,
-                                deviceCapabilities = deviceCapabilities,
-                                onToggleSamplePreview = onToggleSamplePreview,
-                                onOpenSampleLab = onOpenSampleLab,
-                                onUpdate = onUpdate
-                            )
-                            StudioToolTab.TRIM -> TrimPanel(state, deviceCapabilities, onUpdate)
-                            StudioToolTab.CROP -> CropPanel(state, onUpdate, onSelectCropPreset)
                         }
                     }
+
+                    Spacer(Modifier.height(12.dp))
                 }
 
-                // Privacy & Metadata Nuance Strip
-                WorkshopDomainCard(
-                    domain = EngineDomain.DELIVERY,
-                    isActive = false,
-                    shape = RoundedCornerShape(14.dp),
-                    contentPadding = PaddingValues(horizontal = 14.dp, vertical = 10.dp)
-                ) {
-                    Row(
-                        modifier = Modifier.fillMaxWidth(),
-                        horizontalArrangement = Arrangement.SpaceBetween,
-                        verticalAlignment = Alignment.CenterVertically
-                    ) {
-                        Column(modifier = Modifier.weight(1f)) {
-                            Text(
-                                text = "Strip EXIF / GPS / Device Metadata",
-                                style = MaterialTheme.typography.bodyMedium,
-                                color = CrispWhite
-                            )
-                            Text(
-                                text = "Clean privacy metadata before saving or pasting",
-                                style = MaterialTheme.typography.labelSmall,
-                                color = MutedSteel
-                            )
-                        }
-                        ForgeInfoTipButton(
-                            topic = SettingTopic.STRIP_METADATA,
-                            capabilityReport = deviceCapabilities
-                        )
-                        Spacer(Modifier.width(6.dp))
-                        Switch(
-                            checked = state.stripMetadata,
-                            onCheckedChange = { checked -> onUpdate { it.copy(stripMetadata = checked) } }
-                        )
-                    }
-                }
-
-                Spacer(Modifier.height(12.dp))
-            }
-
-            // Inline progress overlay when running Copy / Save & Copy from Share Menu
-            if (watchedJob != null) {
-                Box(
-                    modifier = Modifier
-                        .fillMaxSize()
-                        .background(ObsidianBg.copy(alpha = 0.88f)),
-                    contentAlignment = Alignment.Center
-                ) {
-                    WorkshopDomainCard(
-                        domain = if (watchedJob.statusEnum == JobStatus.COMPLETED) {
-                            EngineDomain.DELIVERY
-                        } else {
-                            EngineDomain.FORGE
-                        },
-                        isActive = watchedJob.isActive,
-                        shape = RoundedCornerShape(20.dp),
-                        contentPadding = PaddingValues(20.dp),
+                // Inline progress overlay when running Copy / Save & Copy
+                if (watchedJob != null) {
+                    Box(
                         modifier = Modifier
-                            .fillMaxWidth()
-                            .padding(24.dp)
+                            .fillMaxSize()
+                            .background(ObsidianBg.copy(alpha = 0.88f)),
+                        contentAlignment = Alignment.Center
                     ) {
-                        Column(
-                            verticalArrangement = Arrangement.spacedBy(14.dp),
-                            horizontalAlignment = Alignment.CenterHorizontally
+                        WorkshopDomainCard(
+                            domain = if (watchedJob.statusEnum == JobStatus.COMPLETED) {
+                                EngineDomain.DELIVERY
+                            } else {
+                                EngineDomain.FORGE
+                            },
+                            isActive = watchedJob.isActive,
+                            shape = RoundedCornerShape(20.dp),
+                            contentPadding = PaddingValues(20.dp),
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .padding(24.dp)
                         ) {
-                            when (watchedJob.statusEnum) {
-                                JobStatus.COMPLETED -> {
-                                    Icon(
-                                        Icons.Rounded.CheckCircle,
-                                        contentDescription = null,
-                                        tint = EmeraldSuccess,
-                                        modifier = Modifier.size(44.dp)
-                                    )
-                                    Text(
-                                        text = "Ready to Paste!",
-                                        style = MaterialTheme.typography.titleMedium,
-                                        color = CrispWhite
-                                    )
-                                    Text(
-                                        text = watchedJob.statusText,
-                                        style = MaterialTheme.typography.bodySmall,
-                                        color = SecundaSilver
-                                    )
-                                    ForgePrimaryButton(
-                                        onClick = onClose,
-                                        text = "Done",
-                                        modifier = Modifier.fillMaxWidth()
-                                    )
-                                }
-                                JobStatus.FAILED, JobStatus.CANCELED -> {
-                                    Icon(
-                                        Icons.Rounded.ErrorOutline,
-                                        contentDescription = null,
-                                        tint = CoralError,
-                                        modifier = Modifier.size(44.dp)
-                                    )
-                                    Text(
-                                        text = watchedJob.statusText,
-                                        style = MaterialTheme.typography.titleMedium,
-                                        color = CrispWhite
-                                    )
-                                    if (!watchedJob.errorMessage.isNullOrBlank()) {
+                            Column(
+                                verticalArrangement = Arrangement.spacedBy(14.dp),
+                                horizontalAlignment = Alignment.CenterHorizontally
+                            ) {
+                                when (watchedJob.statusEnum) {
+                                    JobStatus.COMPLETED -> {
+                                        Icon(
+                                            Icons.Rounded.CheckCircle,
+                                            contentDescription = null,
+                                            tint = EmeraldSuccess,
+                                            modifier = Modifier.size(44.dp)
+                                        )
                                         Text(
-                                            text = watchedJob.errorMessage,
+                                            text = "Ready to Paste",
+                                            style = MaterialTheme.typography.titleMedium,
+                                            color = CrispWhite
+                                        )
+                                        Text(
+                                            text = watchedJob.statusText,
                                             style = MaterialTheme.typography.bodySmall,
-                                            color = CoralError
+                                            color = SecundaSilver
+                                        )
+                                        ForgePrimaryButton(
+                                            onClick = onClose,
+                                            text = "Done",
+                                            modifier = Modifier.fillMaxWidth()
                                         )
                                     }
-                                    ForgePrimaryButton(
-                                        onClick = onClearInlineWatch,
-                                        text = "Back to Editor",
-                                        modifier = Modifier.fillMaxWidth()
-                                    )
-                                }
-                                else -> {
-                                    DomainRolePill(domain = EngineDomain.FORGE, label = "Forging")
-                                    Text(
-                                        text = "Forging Media...",
-                                        style = MaterialTheme.typography.titleMedium,
-                                        color = CrispWhite
-                                    )
-                                    Text(
-                                        text = watchedJob.statusText,
-                                        style = MaterialTheme.typography.bodySmall,
-                                        color = SecundaSilver
-                                    )
-                                    LinearProgressIndicator(
-                                        progress = { (watchedJob.progress / 100f).coerceIn(0f, 1f) },
-                                        color = MoltenEmber,
-                                        trackColor = SlateCard,
-                                        modifier = Modifier
-                                            .fillMaxWidth()
-                                            .height(8.dp)
-                                            .clip(RoundedCornerShape(4.dp))
-                                    )
-                                    OutlinedButton(
-                                        onClick = onRunInBackground,
-                                        shape = RoundedCornerShape(12.dp),
-                                        modifier = Modifier.fillMaxWidth()
-                                    ) {
-                                        Text("Run in Background")
+                                    JobStatus.FAILED, JobStatus.CANCELED -> {
+                                        Icon(
+                                            Icons.Rounded.ErrorOutline,
+                                            contentDescription = null,
+                                            tint = CoralError,
+                                            modifier = Modifier.size(44.dp)
+                                        )
+                                        Text(
+                                            text = watchedJob.statusText,
+                                            style = MaterialTheme.typography.titleMedium,
+                                            color = CrispWhite
+                                        )
+                                        if (!watchedJob.errorMessage.isNullOrBlank()) {
+                                            Text(
+                                                text = watchedJob.errorMessage,
+                                                style = MaterialTheme.typography.bodySmall,
+                                                color = CoralError
+                                            )
+                                        }
+                                        ForgePrimaryButton(
+                                            onClick = onClearInlineWatch,
+                                            text = "Back to Studio",
+                                            modifier = Modifier.fillMaxWidth()
+                                        )
+                                    }
+                                    else -> {
+                                        DomainRolePill(domain = EngineDomain.FORGE, label = "Processing")
+                                        Text(
+                                            text = "Forging Media...",
+                                            style = MaterialTheme.typography.titleMedium,
+                                            color = CrispWhite
+                                        )
+                                        Text(
+                                            text = watchedJob.statusText,
+                                            style = MaterialTheme.typography.bodySmall,
+                                            color = SecundaSilver
+                                        )
+                                        if (watchedJob.progress < 0f) {
+                                            LinearProgressIndicator(
+                                                color = MoltenEmber,
+                                                trackColor = SlateCard,
+                                                modifier = Modifier
+                                                    .fillMaxWidth()
+                                                    .height(8.dp)
+                                                    .clip(RoundedCornerShape(4.dp))
+                                            )
+                                        } else {
+                                            LinearProgressIndicator(
+                                                progress = { (watchedJob.progress / 100f).coerceIn(0f, 1f) },
+                                                color = MoltenEmber,
+                                                trackColor = SlateCard,
+                                                modifier = Modifier
+                                                    .fillMaxWidth()
+                                                    .height(8.dp)
+                                                    .clip(RoundedCornerShape(4.dp))
+                                            )
+                                        }
+                                        OutlinedButton(
+                                            onClick = onRunInBackground,
+                                            shape = RoundedCornerShape(12.dp),
+                                            modifier = Modifier.fillMaxWidth()
+                                        ) {
+                                            Text("Continue in Background")
+                                        }
                                     }
                                 }
                             }
@@ -751,33 +778,153 @@ fun StudioEditorScreen(
     }
 }
 
+@Composable
+private fun StageQuickPill(
+    label: String,
+    icon: ImageVector,
+    enabled: Boolean,
+    lockedOn: Boolean = false,
+    onClick: () -> Unit
+) {
+    Surface(
+        color = if (enabled) FurnaceCard else AnvilGunmetal,
+        shape = RoundedCornerShape(12.dp),
+        border = BorderStroke(
+            width = if (enabled) 1.35.dp else 1.dp,
+            color = if (enabled) EmeraldSuccess.copy(alpha = 0.72f) else ForgeBevelOutline
+        ),
+        modifier = Modifier
+            .clip(RoundedCornerShape(12.dp))
+            .clickable(enabled = !lockedOn, onClick = onClick)
+    ) {
+        Row(
+            modifier = Modifier.padding(horizontal = 11.dp, vertical = 8.dp),
+            verticalAlignment = Alignment.CenterVertically,
+            horizontalArrangement = Arrangement.spacedBy(6.dp)
+        ) {
+            Icon(
+                imageVector = icon,
+                contentDescription = null,
+                tint = if (enabled) EmberFlame else MutedSteel,
+                modifier = Modifier.size(16.dp)
+            )
+            Text(
+                text = label,
+                style = MaterialTheme.typography.labelMedium,
+                color = if (enabled) CrispWhite else MutedSteel
+            )
+            if (enabled) {
+                Box(
+                    modifier = Modifier
+                        .size(7.dp)
+                        .clip(CircleShape)
+                        .background(EmeraldSuccess)
+                )
+            }
+        }
+    }
+}
+
+@Composable
+private fun CollapsibleStudioSectionCard(
+    title: String,
+    icon: ImageVector,
+    isEnabled: Boolean,
+    statusSummary: String,
+    switchEnabled: Boolean = true,
+    onToggleEnabled: (Boolean) -> Unit,
+    content: @Composable () -> Unit
+) {
+    WorkshopDomainCard(
+        domain = if (isEnabled) EngineDomain.FORGE else EngineDomain.DELIVERY,
+        isActive = false,
+        shape = RoundedCornerShape(16.dp),
+        contentPadding = PaddingValues(14.dp)
+    ) {
+        Column(verticalArrangement = Arrangement.spacedBy(12.dp)) {
+            Row(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .clickable(enabled = switchEnabled) { onToggleEnabled(!isEnabled) },
+                horizontalArrangement = Arrangement.SpaceBetween,
+                verticalAlignment = Alignment.CenterVertically
+            ) {
+                Row(
+                    modifier = Modifier.weight(1f),
+                    verticalAlignment = Alignment.CenterVertically,
+                    horizontalArrangement = Arrangement.spacedBy(10.dp)
+                ) {
+                    Surface(
+                        color = if (isEnabled) FurnaceCard else SlateCard,
+                        shape = RoundedCornerShape(10.dp),
+                        border = BorderStroke(
+                            1.dp,
+                            if (isEnabled) EmberFlame.copy(alpha = 0.6f) else SlateOutline
+                        ),
+                        modifier = Modifier.size(36.dp)
+                    ) {
+                        Box(contentAlignment = Alignment.Center) {
+                            Icon(
+                                imageVector = icon,
+                                contentDescription = null,
+                                tint = if (isEnabled) EmberFlame else MutedSteel,
+                                modifier = Modifier.size(18.dp)
+                            )
+                        }
+                    }
+                    Column(verticalArrangement = Arrangement.spacedBy(2.dp)) {
+                        Text(
+                            text = title,
+                            style = MaterialTheme.typography.titleSmall,
+                            fontWeight = FontWeight.SemiBold,
+                            color = if (isEnabled) CrispWhite else SecundaSilver
+                        )
+                        Text(
+                            text = statusSummary,
+                            style = MaterialTheme.typography.labelSmall,
+                            color = if (isEnabled) EmeraldSuccess else MutedSteel,
+                            maxLines = 1,
+                            overflow = TextOverflow.Ellipsis
+                        )
+                    }
+                }
+                Spacer(Modifier.width(8.dp))
+                Switch(
+                    checked = isEnabled,
+                    enabled = switchEnabled,
+                    onCheckedChange = onToggleEnabled
+                )
+            }
+
+            AnimatedVisibility(
+                visible = isEnabled,
+                enter = fadeIn() + expandVertically(),
+                exit = fadeOut() + shrinkVertically()
+            ) {
+                Column(verticalArrangement = Arrangement.spacedBy(12.dp)) {
+                    HorizontalDivider(color = ForgeBevelOutline)
+                    content()
+                }
+            }
+        }
+    }
+}
+
 @OptIn(ExperimentalLayoutApi::class)
 @Composable
-private fun ConvertPanel(
+private fun ConvertPanelBody(
     state: StudioSessionState,
     deviceCapabilities: DeviceCapabilityReport,
     onUpdate: ((StudioItemConfig) -> StudioItemConfig) -> Unit
 ) {
     val kind = state.primaryItem.mediaKind
-    Row(
-        modifier = Modifier.fillMaxWidth(),
-        horizontalArrangement = Arrangement.SpaceBetween,
-        verticalAlignment = Alignment.CenterVertically
-    ) {
-        Text("Format Conversion", style = MaterialTheme.typography.titleSmall, color = CrispWhite)
-        Switch(
-            checked = state.convertEnabled || kind == MediaKind.CAMERA_RAW,
-            enabled = kind != MediaKind.CAMERA_RAW,
-            onCheckedChange = { enabled -> onUpdate { it.copy(convertEnabled = enabled) } }
-        )
-    }
-
     val formats = when (kind) {
         MediaKind.IMAGE, MediaKind.CAMERA_RAW -> listOf("jpg", "png", "webp")
         MediaKind.AUDIO -> listOf("mp3", "m4a", "opus", "flac", "wav")
         else -> listOf("mp4", "mkv", "webm", "gif", "mp3", "m4a")
     }
 
+    Text("Target Output Format", style = MaterialTheme.typography.labelMedium, color = SecundaSilver)
     FlowRow(horizontalArrangement = Arrangement.spacedBy(8.dp), verticalArrangement = Arrangement.spacedBy(6.dp)) {
         formats.forEach { ext ->
             FilterChip(
@@ -819,7 +966,7 @@ private fun ConvertPanel(
             horizontalArrangement = Arrangement.SpaceBetween,
             verticalAlignment = Alignment.CenterVertically
         ) {
-            Text("Video Codec", style = MaterialTheme.typography.labelMedium, color = SecundaSilver)
+            Text("Video Encoder", style = MaterialTheme.typography.labelMedium, color = SecundaSilver)
             ForgeInfoTipButton(topic = SettingTopic.VIDEO_CODEC, capabilityReport = deviceCapabilities)
         }
         FlowRow(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
@@ -841,7 +988,7 @@ private fun ConvertPanel(
 
 @OptIn(ExperimentalLayoutApi::class)
 @Composable
-private fun CompressPanel(
+private fun CompressPanelBody(
     state: StudioSessionState,
     previewEstimate: EstimatedSizeResult,
     deviceCapabilities: DeviceCapabilityReport,
@@ -850,19 +997,7 @@ private fun CompressPanel(
     onUpdate: ((StudioItemConfig) -> StudioItemConfig) -> Unit
 ) {
     val primary = state.primaryItem
-    Row(
-        modifier = Modifier.fillMaxWidth(),
-        horizontalArrangement = Arrangement.SpaceBetween,
-        verticalAlignment = Alignment.CenterVertically
-    ) {
-        Text("Compress & Filesize Reducer", style = MaterialTheme.typography.titleSmall, color = CrispWhite)
-        Switch(
-            checked = state.compressEnabled,
-            onCheckedChange = { enabled -> onUpdate { it.copy(compressEnabled = enabled) } }
-        )
-    }
 
-    // Inline Tap-to-Toggle Sample Frame Preview (zero fade lag, works in Target MB & Quality modes)
     if (primary.isVisual) {
         val origBmp = state.originalSampleBitmap ?: state.previewBitmap
         val compBmp = state.compressedSampleBitmap
@@ -899,7 +1034,7 @@ private fun CompressPanel(
                     if (displayBmp != null && !displayBmp.isRecycled) {
                         Image(
                             bitmap = displayBmp.asImageBitmap(),
-                            contentDescription = if (showingCompressed) "Forge sample frame" else "Original frame",
+                            contentDescription = if (showingCompressed) "Compressed sample frame" else "Original frame",
                             contentScale = ContentScale.Fit,
                             modifier = Modifier
                                 .fillMaxWidth()
@@ -919,7 +1054,6 @@ private fun CompressPanel(
                         )
                     }
 
-                    // Crisp instant comparison corner pill
                     Surface(
                         color = if (showingCompressed) SampleActiveBadgeBg else RelayCard.copy(alpha = 0.92f),
                         shape = RoundedCornerShape(8.dp),
@@ -946,7 +1080,6 @@ private fun CompressPanel(
                         )
                     }
 
-                    // Top-right calibration status pill
                     Surface(
                         color = AnvilGunmetal.copy(alpha = 0.88f),
                         shape = RoundedCornerShape(8.dp),
@@ -979,7 +1112,7 @@ private fun CompressPanel(
                                     modifier = Modifier.size(13.dp)
                                 )
                                 Text(
-                                    text = if (hasCompressedSample) "Tap to compare" else "Preparing sample",
+                                    text = if (hasCompressedSample) "Tap to flip" else "Preparing sample",
                                     style = MaterialTheme.typography.labelSmall,
                                     color = SecundaSilver
                                 )
@@ -995,11 +1128,11 @@ private fun CompressPanel(
                 ) {
                     Text(
                         text = if (showingCompressed) {
-                            "Showing FORGE SAMPLE (tap to flip to Original)"
+                            "Showing compressed sample (tap to compare original)"
                         } else if (hasCompressedSample) {
-                            "Showing ORIGINAL (tap to inspect Forge Sample)"
+                            "Showing original frame (tap to compare compressed)"
                         } else {
-                            "Midpoint frame sample updates live as settings change"
+                            "Live sample updates as compression settings change"
                         },
                         style = MaterialTheme.typography.labelSmall,
                         color = MutedSteel,
@@ -1027,7 +1160,7 @@ private fun CompressPanel(
                     )
                     Spacer(Modifier.width(6.dp))
                     Text(
-                        text = "Compare Multiple Configs in Fullscreen Sample Lab",
+                        text = "Compare Multiple Configs in Sample Lab",
                         style = MaterialTheme.typography.labelMedium,
                         color = EmberFlame
                     )
@@ -1040,7 +1173,7 @@ private fun CompressPanel(
         FilterChip(
             selected = state.compressMode == CompressMode.TARGET_BYTES,
             onClick = { onUpdate { it.copy(compressEnabled = true, compressMode = CompressMode.TARGET_BYTES) } },
-            label = { Text("Exact Target MB") }
+            label = { Text("Exact Target Size (MB)") }
         )
         FilterChip(
             selected = state.compressMode == CompressMode.QUALITY,
@@ -1085,7 +1218,7 @@ private fun CompressPanel(
                 verticalAlignment = Alignment.CenterVertically
             ) {
                 Text(
-                    text = "Perceptual Compression Engine",
+                    text = "Compression Engine",
                     style = MaterialTheme.typography.labelMedium,
                     color = SecundaSilver,
                     modifier = Modifier.weight(1f)
@@ -1134,7 +1267,7 @@ private fun CompressPanel(
                 preferOpusAudio = !state.convertEnabled && state.compressionTier == CompressionTier.PERCEPTUAL_AV1
             )
             Text(
-                text = "Auto budget: ${plan.strategySummary}",
+                text = "Planned bitrate: ${plan.strategySummary}",
                 style = MaterialTheme.typography.bodySmall,
                 color = if (plan.isTightBudgetWarning) CoralError else EmeraldSuccess
             )
@@ -1161,7 +1294,7 @@ private fun CompressPanel(
                 verticalAlignment = Alignment.CenterVertically
             ) {
                 Text(
-                    text = "Video CRF (lower = higher quality): ${state.videoCrf}",
+                    text = "Quality Level (CRF — lower means sharper): ${state.videoCrf}",
                     style = MaterialTheme.typography.labelMedium,
                     color = SecundaSilver,
                     modifier = Modifier.weight(1f)
@@ -1177,7 +1310,7 @@ private fun CompressPanel(
     }
 
     if (primary.isVisual) {
-        Text("Max Dimension Cap", style = MaterialTheme.typography.labelMedium, color = SecundaSilver)
+        Text("Maximum Resolution Cap", style = MaterialTheme.typography.labelMedium, color = SecundaSilver)
         FlowRow(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
             listOf(null to "Original", 2560 to "2560px", 1920 to "1080p", 1280 to "720p", 854 to "480p").forEach { (dim, label) ->
                 FilterChip(
@@ -1196,8 +1329,8 @@ private fun CompressPanel(
             verticalAlignment = Alignment.CenterVertically
         ) {
             Column(modifier = Modifier.weight(1f)) {
-                Text("Fast Half-Size RAW Demosaic", style = MaterialTheme.typography.bodySmall, color = CrispWhite)
-                Text("4x faster & ultra-low RAM for 60MP–100MP sensors", style = MaterialTheme.typography.labelSmall, color = MutedSteel)
+                Text("Fast Half-Size RAW Processing", style = MaterialTheme.typography.bodySmall, color = CrispWhite)
+                Text("4x faster with low memory usage on 50MP+ sensors", style = MaterialTheme.typography.labelSmall, color = MutedSteel)
             }
             ForgeInfoTipButton(topic = SettingTopic.RAW_HALF_SIZE_FAST, capabilityReport = deviceCapabilities)
             Spacer(Modifier.width(6.dp))
@@ -1210,7 +1343,7 @@ private fun CompressPanel(
 }
 
 @Composable
-private fun TrimPanel(
+private fun TrimPanelBody(
     state: StudioSessionState,
     deviceCapabilities: DeviceCapabilityReport,
     onUpdate: ((StudioItemConfig) -> StudioItemConfig) -> Unit
@@ -1219,20 +1352,15 @@ private fun TrimPanel(
     val startMs = state.trimStartMs.coerceIn(0L, totalMs - 500L)
     val endMs = state.trimEndMs.takeIf { it > startMs }?.coerceAtMost(totalMs) ?: totalMs
 
-    Row(
-        modifier = Modifier.fillMaxWidth(),
-        horizontalArrangement = Arrangement.SpaceBetween,
-        verticalAlignment = Alignment.CenterVertically
-    ) {
-        Text("Trim & Audio Controls", style = MaterialTheme.typography.titleSmall, color = CrispWhite)
-        Switch(
-            checked = state.trimEnabled,
-            onCheckedChange = { enabled -> onUpdate { it.copy(trimEnabled = enabled) } }
-        )
-    }
+    TrimRangePreviewPlayer(
+        probe = state.primaryItem,
+        trimStartMs = startMs,
+        trimEndMs = endMs,
+        muteAudio = state.muteAudio
+    )
 
     Text(
-        text = "Range: ${formatMs(startMs)} → ${formatMs(endMs)} (Clip ${formatMs(endMs - startMs)})",
+        text = "Selected Range: ${formatMs(startMs)} → ${formatMs(endMs)} (Clip ${formatMs(endMs - startMs)})",
         style = MaterialTheme.typography.labelMedium,
         color = SecundaSilver
     )
@@ -1291,7 +1419,7 @@ private fun TrimPanel(
     ) {
         Column(modifier = Modifier.weight(1f)) {
             Text("Fast Keyframe Copy Cut", style = MaterialTheme.typography.bodySmall, color = CrispWhite)
-            Text("Zero quality loss & near-instant when not re-encoding", style = MaterialTheme.typography.labelSmall, color = MutedSteel)
+            Text("Instant trim without re-encoding when no format/compression edits are active", style = MaterialTheme.typography.labelSmall, color = MutedSteel)
         }
         ForgeInfoTipButton(topic = SettingTopic.FAST_KEYFRAME_TRIM, capabilityReport = deviceCapabilities)
         Spacer(Modifier.width(6.dp))
@@ -1306,7 +1434,7 @@ private fun TrimPanel(
         horizontalArrangement = Arrangement.SpaceBetween,
         verticalAlignment = Alignment.CenterVertically
     ) {
-        Text("Smooth Fade In / Fade Out", style = MaterialTheme.typography.bodySmall, color = CrispWhite)
+        Text("Smooth Fade In & Fade Out", style = MaterialTheme.typography.bodySmall, color = CrispWhite)
         Switch(
             checked = state.fadeInOut,
             onCheckedChange = { checked -> onUpdate { it.copy(trimEnabled = true, fadeInOut = checked) } }
@@ -1338,7 +1466,7 @@ private fun TrimPanel(
         subtitle = if (state.primaryItem.mediaKind == MediaKind.VIDEO &&
             state.targetExtension.lowercase() !in setOf("mp3", "m4a", "aac", "opus", "ogg", "flac", "wav")
         ) {
-            "Tightens dead pauses with synchronized A/V jumpcuts"
+            "Cuts silent pauses cleanly while keeping audio and video in sync"
         } else {
             "Tightens quiet pauses cleanly without clipping speech tails"
         },
@@ -1358,31 +1486,18 @@ private fun TrimPanel(
 
 @OptIn(ExperimentalLayoutApi::class)
 @Composable
-private fun CropPanel(
+private fun CropPanelBody(
     state: StudioSessionState,
     onUpdate: ((StudioItemConfig) -> StudioItemConfig) -> Unit,
     onSelectCropPreset: (AspectPreset) -> Unit
 ) {
     val primary = state.primaryItem
-    Row(
-        modifier = Modifier.fillMaxWidth(),
-        horizontalArrangement = Arrangement.SpaceBetween,
-        verticalAlignment = Alignment.CenterVertically
-    ) {
-        Column {
-            Text("Crop & Aspect Snap", style = MaterialTheme.typography.titleSmall, color = CrispWhite)
-            val autoClosest = AspectRatioSnapper.closestDefaultPreset(primary.effectiveWidth, primary.effectiveHeight)
-            Text(
-                text = "Closest canonical default: ${autoClosest.label}",
-                style = MaterialTheme.typography.labelSmall,
-                color = EmeraldSuccess
-            )
-        }
-        Switch(
-            checked = state.cropEnabled,
-            onCheckedChange = { enabled -> onUpdate { it.copy(cropEnabled = enabled) } }
-        )
-    }
+    val autoClosest = AspectRatioSnapper.closestDefaultPreset(primary.effectiveWidth, primary.effectiveHeight)
+    Text(
+        text = "Suggested native ratio: ${autoClosest.label}",
+        style = MaterialTheme.typography.labelSmall,
+        color = EmeraldSuccess
+    )
 
     CropCanvasOverlay(
         bitmap = state.previewBitmap,
@@ -1430,5 +1545,5 @@ private fun formatMs(ms: Long): String {
     val min = totalSec / 60L
     val sec = totalSec % 60L
     val tenths = (ms % 1000L) / 100L
-    return String.format("%d:%02d.%d", min, sec, tenths)
+    return String.format(Locale.US, "%d:%02d.%d", min, sec, tenths)
 }

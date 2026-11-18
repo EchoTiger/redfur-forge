@@ -46,6 +46,8 @@ jobs:
           fi
 
       - name: Run unit tests and assemble release APKs
+        env:
+          GH_TOKEN: ${{ github.token }}
         run: ./gradlew testDebugUnitTest assembleRelease --no-daemon --stacktrace
 
       - name: Upload Release APKs

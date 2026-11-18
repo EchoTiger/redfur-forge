@@ -1,6 +1,17 @@
-# Redfur Forge (`com.fissal.forge`) — v2.0.0
+# Redfur Forge (`com.fissal.forge`) — v2.1.0
 
 Native Android Kotlin + Jetpack Compose sovereign media utility wrapping **yt-dlp**, **FFmpeg / FFprobe**, **aria2c**, and **LibRaw** (`AndroidLibRaw`) with dual-engine **Arc-Relay** intake and **Molten Forge** local transformation.
+
+## What's New in v2.1
+- **Workshop Home & Global Engine Dock**: Two-button Forge landing view (`Download Media` and `Forge Studio`, plus `Sample Frame Lab`) paired with a sticky viewport `WorkflowViewportDock` showing active engine status, worker slots, and queue state across screens.
+- **Auto-Clearing Batch Link Input**: Resolvable URLs automatically clear from the input box once staged while preserving previously resolved cards and batch selections until you dismiss them or submit.
+- **Smooth Indeterminate & Dual-Stream Progress**: Eliminates extended `0%` stalls during extractor/SponsorBlock handshakes via indeterminate progress stages and monotonic `Step 1/2` / `Step 2/2` reporting (`YtDlpProgressTracker`).
+- **Queue → Forge Studio Re-Entry**: Completed download items, playlist groups, and track cards include direct `Convert / Compress` actions that load outputs straight into Forge Studio.
+- **Live Trim Range Previewer**: Dedicated `TrimRangePreviewPlayer` inside Studio Trim & Audio with start/end scrubbing, `Play Range` / `Pause`, `From Start`, `Last 2s`, `Loop`, and mute reflection.
+- **Collapsible Studio Section Cards**: Switching Convert Format, Compress & Reduce Size, Trim & Audio, or Crop & Aspect Ratio off hides its configuration drawer cleanly via `AnimatedVisibility`.
+- **Build-Time & First-Launch `yt-dlp` Auto-Sync**: Automatically bundles the latest upstream `yt-dlp` release during Gradle builds (`SyncLatestYtDlpTask`) and checks/updates on first app launch and every 12 hours when enabled.
+- **Queue Timestamps & Color-Coded Task Types**: Queue cards display relative `Added` timestamps alongside color-coded type badges and accent stripes (`Download`, `Convert`, `Compress`, `Trim`, `Crop`, `Forge`).
+- **Clearer Settings & UI Copy**: Plain-English section descriptions (including `Download Defaults`), clearer default resolution/audio pickers, and refined controls across Hub, Studio, Queue, and Settings.
 
 ## What's New in v2.0
 

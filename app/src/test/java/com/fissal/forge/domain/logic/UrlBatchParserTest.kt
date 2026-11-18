@@ -30,4 +30,26 @@ class UrlBatchParserTest {
         assertTrue(parsed[0].isPlaylistLike)
         assertEquals("https://www.youtube.com/watch?v=abc123&list=PLxyz999", parsed[0].cleanUrl)
     }
+
+    @Test
+    fun removesResolvedUrlCleanlyWhilePreservingRemainingBatchUrls() {
+        val raw = """
+            https://www.youtube.com/watch?v=abc123&si=track001
+            https://soundcloud.com/artist/track-two?utm_source=clipboard
+        """.trimIndent()
+
+        val afterFirst = UrlBatchParser.removeResolvedUrlFromText(
+            rawText = raw,
+            targetCleanUrl = "https://www.youtube.com/watch?v=abc123",
+            stripTracking = true
+        )
+        assertEquals("https://soundcloud.com/artist/track-two?utm_source=clipboard", afterFirst)
+
+        val afterSecond = UrlBatchParser.removeResolvedUrlFromText(
+            rawText = afterFirst,
+            targetCleanUrl = "https://soundcloud.com/artist/track-two",
+            stripTracking = true
+        )
+        assertEquals("", afterSecond)
+    }
 }

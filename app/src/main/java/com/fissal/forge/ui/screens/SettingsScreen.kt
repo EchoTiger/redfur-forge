@@ -131,11 +131,12 @@ fun SettingsScreen(
             .padding(horizontal = 16.dp, vertical = 12.dp),
         verticalArrangement = Arrangement.spacedBy(14.dp)
     ) {
-        // GitHub Release App Auto-Updater
+        // 1. App Updates (GitHub Releases)
         SettingsDomainCard(
-            title = "App Updates (GitHub Releases)",
+            title = "App Updates",
+            subtitle = "Check GitHub Releases for newer signed builds of Redfur Forge.",
             domain = EngineDomain.RELAY,
-            pillLabel = "GitHub Sync",
+            pillLabel = "App Updater",
             isActive = appUpdateState.phase == AppUpdatePhase.DOWNLOADING ||
                 appUpdateState.phase == AppUpdatePhase.CHECKING
         ) {
@@ -149,7 +150,7 @@ fun SettingsScreen(
                 }
                 AppUpdatePhase.UP_TO_DATE -> {
                     statusColor = EmeraldSuccess
-                    statusText = "Up to date (v${appUpdateState.currentVersion})"
+                    statusText = "You are on the latest release (v${appUpdateState.currentVersion})"
                 }
                 AppUpdatePhase.AVAILABLE -> {
                     statusColor = MasserCrimson
@@ -167,19 +168,19 @@ fun SettingsScreen(
                 }
                 AppUpdatePhase.READY_TO_INSTALL -> {
                     statusColor = EmeraldSuccess
-                    statusText = "Verified & ready to install (${release?.tagName ?: ""})"
+                    statusText = "SHA-256 verified and ready to install (${release?.tagName ?: ""})"
                 }
                 AppUpdatePhase.NEEDS_INSTALL_PERMISSION -> {
                     statusColor = AmberActive
-                    statusText = "Grant app install permission to apply ${release?.tagName ?: ""}"
+                    statusText = "Allow app installs in Android settings to apply ${release?.tagName ?: ""}"
                 }
                 AppUpdatePhase.ERROR -> {
                     statusColor = CoralError
-                    statusText = appUpdateState.errorMessage ?: "Update check failed"
+                    statusText = appUpdateState.errorMessage ?: "Could not check for updates"
                 }
                 AppUpdatePhase.IDLE -> {
                     statusColor = SecundaSilver
-                    statusText = "Installed: v${appUpdateState.currentVersion}"
+                    statusText = "Installed version: v${appUpdateState.currentVersion}"
                 }
             }
 
@@ -189,7 +190,7 @@ fun SettingsScreen(
                 verticalAlignment = Alignment.CenterVertically
             ) {
                 Text(
-                    text = "Installed: v${appUpdateState.currentVersion}",
+                    text = "Current Build: v${appUpdateState.currentVersion}",
                     style = MaterialTheme.typography.bodyMedium,
                     color = CrispWhite
                 )
@@ -198,7 +199,7 @@ fun SettingsScreen(
                     shape = RoundedCornerShape(8.dp)
                 ) {
                     Text(
-                        text = if (appUpdateState.phase == AppUpdatePhase.IDLE) "GitHub Sync" else appUpdateState.phase.name.replace('_', ' '),
+                        text = friendlyUpdatePhaseLabel(appUpdateState.phase),
                         style = MaterialTheme.typography.labelSmall,
                         color = statusColor,
                         modifier = Modifier.padding(horizontal = 8.dp, vertical = 3.dp)
@@ -254,14 +255,14 @@ fun SettingsScreen(
                         CircularProgressIndicator(modifier = Modifier.size(16.dp), strokeWidth = 2.dp, color = SecundaSilver)
                         Spacer(Modifier.width(6.dp))
                     }
-                    Text("Check Now")
+                    Text("Check Updates", maxLines = 1)
                 }
 
                 when (appUpdateState.phase) {
                     AppUpdatePhase.AVAILABLE -> {
                         RelayPrimaryButton(
                             onClick = onStartAppUpdate,
-                            text = "Update ${release?.tagName ?: ""}",
+                            text = "Download ${release?.tagName ?: ""}",
                             modifier = Modifier.weight(1f)
                         )
                     }
@@ -297,28 +298,28 @@ fun SettingsScreen(
                             shape = RoundedCornerShape(10.dp),
                             modifier = Modifier.weight(1f)
                         ) {
-                            Text("Releases", maxLines = 1)
+                            Text("View on GitHub", maxLines = 1)
                         }
                     }
                 }
             }
 
             SettingsSwitchRow(
-                title = "Auto-check GitHub Releases on launch",
-                subtitle = "Checks EchoTiger/redfur-forge for newer signed APKs at startup",
+                title = "Check for app updates on startup",
+                subtitle = "Looks up the latest release automatically when Redfur Forge launches",
                 checked = settings.autoCheckAppUpdates,
                 onCheckedChange = { v -> onUpdateSettings { it.copy(autoCheckAppUpdates = v) } }
             )
 
             SettingsSwitchRow(
-                title = "Auto-download updates in background",
-                subtitle = "Stages verified matching-ABI APK automatically when a new release lands",
+                title = "Download updates in the background",
+                subtitle = "Stages verified APK updates automatically when available",
                 checked = settings.autoDownloadAppUpdates,
                 onCheckedChange = { v -> onUpdateSettings { it.copy(autoDownloadAppUpdates = v) } }
             )
         }
 
-        // Connected Accounts & Cookies Vault (Issue #6)
+        // 2. Connected Accounts & Cookies Vault
         ConnectionsSettingsCard(
             connections = siteConnections,
             checkingServiceId = checkingServiceId,
@@ -332,13 +333,14 @@ fun SettingsScreen(
             onRemoveConnection = onRemoveSiteConnection
         )
 
-        // Downloader Defaults
+        // 3. Download Defaults
         SettingsDomainCard(
-            title = "Downloader Defaults",
+            title = "Download Defaults",
+            subtitle = "Starting format, quality, and cleanup preferences applied to newly staged URLs.",
             domain = EngineDomain.RELAY,
-            pillLabel = "Relay Intake"
+            pillLabel = "Downloader"
         ) {
-            Text("Default Download Mode", style = MaterialTheme.typography.labelMedium, color = SecundaSilver)
+            Text("Preferred Format", style = MaterialTheme.typography.labelMedium, color = SecundaSilver)
             FlowRow(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
                 DownloadMode.entries.forEach { mode ->
                     FilterChip(
@@ -349,29 +351,51 @@ fun SettingsScreen(
                 }
             }
 
+            Text("Preferred Video Resolution Cap", style = MaterialTheme.typography.labelMedium, color = SecundaSilver)
+            FlowRow(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                listOf(0 to "Best", 1080 to "1080p", 720 to "720p", 480 to "480p").forEach { (h, label) ->
+                    FilterChip(
+                        selected = settings.defaultMaxVideoHeight == h,
+                        onClick = { onUpdateSettings { it.copy(defaultMaxVideoHeight = h) } },
+                        label = { Text(label) }
+                    )
+                }
+            }
+
+            Text("Preferred Audio Format", style = MaterialTheme.typography.labelMedium, color = SecundaSilver)
+            FlowRow(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                listOf("mp3", "opus", "m4a", "flac", "wav").forEach { fmt ->
+                    FilterChip(
+                        selected = settings.defaultAudioFormat.equals(fmt, ignoreCase = true),
+                        onClick = { onUpdateSettings { it.copy(defaultAudioFormat = fmt) } },
+                        label = { Text(fmt.uppercase(Locale.US)) }
+                    )
+                }
+            }
+
             SettingsSwitchRow(
-                title = "Use aria2c multi-connection accelerator",
-                subtitle = "Speeds up large HTTP downloads",
+                title = "Multi-connection speed boost (aria2c)",
+                subtitle = "Uses parallel connections to speed up large public downloads",
                 checked = settings.useAria2c,
                 onCheckedChange = { c -> onUpdateSettings { it.copy(useAria2c = c) } },
                 infoTopic = SettingTopic.ARIA2C_ACCELERATOR,
                 capabilityReport = deviceCapabilities
             )
             SettingsSwitchRow(
-                title = "Single video guard on playlist URLs",
-                subtitle = "Passes --no-playlist by default",
+                title = "Download single video from playlist links",
+                subtitle = "When a video URL includes a playlist ID, download only that video by default",
                 checked = settings.playlistSingleOnly,
                 onCheckedChange = { c -> onUpdateSettings { it.copy(playlistSingleOnly = c) } }
             )
             SettingsSwitchRow(
-                title = "Strip tracking query params (utm_*, si, igsh)",
-                subtitle = "Auto-cleans pasted links while keeping video IDs",
+                title = "Remove tracking parameters from links",
+                subtitle = "Strips utm_*, si, igsh, and share tags while keeping video IDs",
                 checked = settings.stripUrlTracking,
                 onCheckedChange = { c -> onUpdateSettings { it.copy(stripUrlTracking = c) } }
             )
             SettingsSwitchRow(
-                title = "Embed metadata & thumbnail in downloads",
-                subtitle = "Writes artist/title/cover tags via FFmpeg",
+                title = "Embed media info and cover artwork",
+                subtitle = "Writes title, creator, and thumbnail tags into downloaded files",
                 checked = settings.embedDownloadMetadata,
                 onCheckedChange = { c ->
                     onUpdateSettings { it.copy(embedDownloadMetadata = c, embedDownloadThumbnail = c) }
@@ -381,7 +405,7 @@ fun SettingsScreen(
             HorizontalDivider(color = SlateOutline)
 
             SponsorBlockCategorySelector(
-                title = "Default SponsorBlock Categories",
+                title = "Default SponsorBlock Skip Categories",
                 selectedCategories = settings.defaultSponsorBlockCategories,
                 capabilityReport = deviceCapabilities,
                 onToggleCategory = { cat ->
@@ -402,7 +426,7 @@ fun SettingsScreen(
                 enabled = settings.defaultSilenceSkip.enabled,
                 thresholdDb = settings.defaultSilenceSkip.thresholdDb,
                 minSilenceMs = settings.defaultSilenceSkip.minSilenceMs,
-                subtitle = "Post-download FFmpeg silence removal default for new links",
+                subtitle = "Automatically trim silent pauses after download completes",
                 capabilityReport = deviceCapabilities,
                 onToggleEnabled = { enabled ->
                     onUpdateSettings { prev ->
@@ -422,14 +446,15 @@ fun SettingsScreen(
             )
         }
 
-        // Studio & Compression Defaults
+        // 4. Studio & Compression Defaults
         SettingsDomainCard(
-            title = "Studio, RAW & Crop Defaults",
+            title = "Studio & Compression Defaults",
+            subtitle = "Starting encode, filesize, and crop defaults when opening files in Forge Studio.",
             domain = EngineDomain.FORGE,
-            pillLabel = "Local Forge"
+            pillLabel = "Forge Studio"
         ) {
             SettingsHeaderWithTip(
-                label = "Default Video Codec",
+                label = "Preferred Video Encoder",
                 topic = SettingTopic.VIDEO_CODEC,
                 capabilityReport = deviceCapabilities
             )
@@ -449,7 +474,7 @@ fun SettingsScreen(
             }
 
             SettingsHeaderWithTip(
-                label = "Default Video CRF: ${settings.defaultVideoCrf}",
+                label = "Default Video Quality (CRF): ${settings.defaultVideoCrf}",
                 topic = SettingTopic.CRF_SLIDER,
                 capabilityReport = deviceCapabilities
             )
@@ -459,7 +484,7 @@ fun SettingsScreen(
                 valueRange = 16f..34f
             )
 
-            Text("Default RAW Export Format", style = MaterialTheme.typography.labelMedium, color = SecundaSilver)
+            Text("Default Camera RAW Export Format", style = MaterialTheme.typography.labelMedium, color = SecundaSilver)
             FlowRow(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
                 listOf("jpg", "png", "webp").forEach { fmt ->
                     FilterChip(
@@ -471,7 +496,7 @@ fun SettingsScreen(
             }
 
             SettingsHeaderWithTip(
-                label = "Default Target Filesize (MB)",
+                label = "Default Target Size Limit (MB)",
                 topic = SettingTopic.TARGET_FILESIZE,
                 capabilityReport = deviceCapabilities
             )
@@ -485,7 +510,7 @@ fun SettingsScreen(
                 }
             }
 
-            Text("Default Crop Aspect Snap", style = MaterialTheme.typography.labelMedium, color = SecundaSilver)
+            Text("Default Crop Aspect Ratio", style = MaterialTheme.typography.labelMedium, color = SecundaSilver)
             FlowRow(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
                 listOf(
                     AspectPreset.AUTO_CLOSEST,
@@ -503,8 +528,8 @@ fun SettingsScreen(
             }
 
             SettingsSwitchRow(
-                title = "Fast half-size RAW demosaic by default",
-                subtitle = "Halves dimensions on massive sensors for 4x speed",
+                title = "Fast half-size RAW processing by default",
+                subtitle = "Halves dimensions on high-megapixel RAW sensors for 4x speed",
                 checked = settings.rawHalfSizeFast,
                 onCheckedChange = { c -> onUpdateSettings { it.copy(rawHalfSizeFast = c) } },
                 infoTopic = SettingTopic.RAW_HALF_SIZE_FAST,
@@ -512,11 +537,12 @@ fun SettingsScreen(
             )
         }
 
-        // Privacy, Concurrency, & Filenames
+        // 5. Privacy, Performance & File Naming
         SettingsDomainCard(
-            title = "Privacy, Concurrency & Naming",
+            title = "Privacy, Performance & Naming",
+            subtitle = "Control metadata scrubbing, parallel task limits, and exported filenames.",
             domain = EngineDomain.DELIVERY,
-            pillLabel = "Workshop Policy"
+            pillLabel = "System Policy"
         ) {
             Surface(
                 shape = RoundedCornerShape(10.dp),
@@ -533,16 +559,16 @@ fun SettingsScreen(
             }
 
             SettingsSwitchRow(
-                title = "Strip EXIF / GPS when copying to clipboard",
-                subtitle = "Protects location data when pasting into chat apps",
+                title = "Strip EXIF and GPS when copying to clipboard",
+                subtitle = "Removes location tags before pasting files into chat apps",
                 checked = settings.stripMetadataOnClipboard,
                 onCheckedChange = { c -> onUpdateSettings { it.copy(stripMetadataOnClipboard = c) } },
                 infoTopic = SettingTopic.STRIP_METADATA,
                 capabilityReport = deviceCapabilities
             )
             SettingsSwitchRow(
-                title = "Strip EXIF / GPS when saving to device",
-                subtitle = "Applies to saved gallery exports too",
+                title = "Strip EXIF and GPS when saving to device",
+                subtitle = "Removes camera and location metadata from exported gallery files",
                 checked = settings.stripMetadataOnSave,
                 onCheckedChange = { c -> onUpdateSettings { it.copy(stripMetadataOnSave = c) } },
                 infoTopic = SettingTopic.STRIP_METADATA,
@@ -550,7 +576,7 @@ fun SettingsScreen(
             )
 
             SettingsHeaderWithTip(
-                label = "Max Concurrent Downloads: ${settings.maxConcurrentDownloads}",
+                label = "Simultaneous Downloads: ${settings.maxConcurrentDownloads}",
                 topic = SettingTopic.CONCURRENCY_SLOTS,
                 capabilityReport = deviceCapabilities
             )
@@ -563,9 +589,9 @@ fun SettingsScreen(
 
             SettingsHeaderWithTip(
                 label = if (settings.computeSlotsOverride == 0) {
-                    "Compute Concurrency: Auto (${deviceCapabilities.recommendedComputeSlots} slots)"
+                    "Parallel Processing Tasks: Auto (${deviceCapabilities.recommendedComputeSlots} slots)"
                 } else {
-                    "Compute Concurrency: ${settings.computeSlotsOverride} slots"
+                    "Parallel Processing Tasks: ${settings.computeSlotsOverride} slots"
                 },
                 topic = SettingTopic.CONCURRENCY_SLOTS,
                 capabilityReport = deviceCapabilities
@@ -573,9 +599,9 @@ fun SettingsScreen(
             FlowRow(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
                 listOf(
                     0 to "Auto (${deviceCapabilities.recommendedComputeSlots})",
-                    2 to "2 Slots",
-                    3 to "3 Slots",
-                    4 to "4 Slots"
+                    2 to "2 Tasks",
+                    3 to "3 Tasks",
+                    4 to "4 Tasks"
                 ).forEach { (slots, label) ->
                     FilterChip(
                         selected = settings.computeSlotsOverride == slots,
@@ -588,24 +614,33 @@ fun SettingsScreen(
             OutlinedTextField(
                 value = settings.filenameSuffix,
                 onValueChange = { txt -> onUpdateSettings { it.copy(filenameSuffix = txt.take(16)) } },
-                label = { Text("Export Filename Suffix") },
+                label = { Text("Exported Filename Suffix") },
                 singleLine = true,
                 modifier = Modifier.fillMaxWidth()
             )
         }
 
-        // Engine Maintenance
+        // 6. Extractor Engine & Storage Cache
         SettingsDomainCard(
-            title = "yt-dlp Engine & Cache Maintenance",
+            title = "Extractor Engine & Cache",
+            subtitle = "Keep yt-dlp extractors up to date for site support and manage temporary cache files.",
             domain = EngineDomain.DELIVERY,
-            pillLabel = "Engine Tools",
+            pillLabel = "Maintenance",
             isActive = isUpdatingYtDlp
         ) {
             Text(
-                text = "yt-dlp version: $ytDlpVersion",
+                text = "Installed yt-dlp version: $ytDlpVersion",
                 style = MaterialTheme.typography.bodyMedium,
                 color = CrispWhite
             )
+
+            SettingsSwitchRow(
+                title = "Auto-update yt-dlp on startup",
+                subtitle = "Updates extractors automatically on first launch and checks periodically",
+                checked = settings.autoUpdateYtDlpOnLaunch,
+                onCheckedChange = { enabled -> onUpdateSettings { it.copy(autoUpdateYtDlpOnLaunch = enabled) } }
+            )
+
             Row(
                 modifier = Modifier.fillMaxWidth(),
                 horizontalArrangement = Arrangement.spacedBy(10.dp)
@@ -633,7 +668,7 @@ fun SettingsScreen(
                 contentPadding = PaddingValues(vertical = 10.dp),
                 modifier = Modifier.fillMaxWidth()
             ) {
-                Text(String.format("Clear Staging & Export Cache (%.1f MB)", cacheMb))
+                Text(String.format(Locale.US, "Clear Temporary Cache (%.1f MB)", cacheMb))
             }
         }
 
@@ -659,9 +694,21 @@ fun SettingsScreen(
     }
 }
 
+private fun friendlyUpdatePhaseLabel(phase: AppUpdatePhase): String = when (phase) {
+    AppUpdatePhase.IDLE -> "Ready"
+    AppUpdatePhase.CHECKING -> "Checking"
+    AppUpdatePhase.UP_TO_DATE -> "Up to Date"
+    AppUpdatePhase.AVAILABLE -> "Available"
+    AppUpdatePhase.DOWNLOADING -> "Downloading"
+    AppUpdatePhase.READY_TO_INSTALL -> "Ready"
+    AppUpdatePhase.NEEDS_INSTALL_PERMISSION -> "Needs Permission"
+    AppUpdatePhase.ERROR -> "Error"
+}
+
 @Composable
 private fun SettingsDomainCard(
     title: String,
+    subtitle: String,
     domain: EngineDomain,
     pillLabel: String,
     isActive: Boolean = false,
@@ -680,17 +727,27 @@ private fun SettingsDomainCard(
             Row(
                 modifier = Modifier.fillMaxWidth(),
                 horizontalArrangement = Arrangement.SpaceBetween,
-                verticalAlignment = Alignment.CenterVertically
+                verticalAlignment = Alignment.Top
             ) {
-                Text(
-                    text = title,
-                    style = MaterialTheme.typography.titleMedium,
-                    color = CrispWhite,
-                    modifier = Modifier.weight(1f)
-                )
+                Column(
+                    modifier = Modifier.weight(1f),
+                    verticalArrangement = Arrangement.spacedBy(3.dp)
+                ) {
+                    Text(
+                        text = title,
+                        style = MaterialTheme.typography.titleMedium,
+                        color = CrispWhite
+                    )
+                    Text(
+                        text = subtitle,
+                        style = MaterialTheme.typography.labelSmall,
+                        color = MutedSteel
+                    )
+                }
                 Spacer(Modifier.width(8.dp))
                 DomainRolePill(domain = domain, label = pillLabel)
             }
+            HorizontalDivider(color = SlateOutline.copy(alpha = 0.65f))
             content()
         }
     }

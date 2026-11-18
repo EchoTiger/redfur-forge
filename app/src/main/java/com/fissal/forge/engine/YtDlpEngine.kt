@@ -4,6 +4,7 @@ import com.fissal.forge.auth.AuthErrorClassifier
 import com.fissal.forge.auth.CredentialRedactor
 import com.fissal.forge.auth.SiteAuthVault
 import com.fissal.forge.domain.logic.YtDlpJsonParser
+import com.fissal.forge.domain.logic.YtDlpProgressTracker
 import com.fissal.forge.domain.model.DownloadMode
 import com.fissal.forge.domain.model.DownloadSpec
 import com.fissal.forge.domain.model.ResolvedUrlMetadata
@@ -32,7 +33,7 @@ class YtDlpEngine(
         cancelKey: String,
         siteConnectionId: String? = null
     ): ResolvedUrlMetadata = withContext(Dispatchers.IO) {
-        binaryManager.ensureInitialized()
+        binaryManager.awaitReadyForExecution()
         withAuthCookies(url, siteConnectionId) { cookieFile, userAgent ->
             val request = YoutubeDLRequest(url).apply {
                 addOption("--flat-playlist")
@@ -96,7 +97,7 @@ class YtDlpEngine(
         downloadHeightOverride: Int? = null,
         onProgress: (Float, String) -> Unit
     ): List<File> = withContext(Dispatchers.IO) {
-        binaryManager.ensureInitialized()
+        binaryManager.awaitReadyForExecution()
         if (!workDir.exists()) workDir.mkdirs()
 
         val effectiveMaxHeight = listOfNotNull(spec.maxHeight, downloadHeightOverride).minOrNull()
@@ -106,6 +107,8 @@ class YtDlpEngine(
                 addOption("-o", "${workDir.absolutePath}/%(title).120B [%(id)s].%(ext)s")
                 addOption("--no-mtime")
                 addOption("--restrict-filenames")
+                addOption("--newline")
+                addOption("--progress")
                 if (cookieFile != null) {
                     addOption("--cookies", cookieFile.absolutePath)
                     userAgent?.takeIf { it.isNotBlank() }?.let { addOption("--user-agent", it) }
@@ -123,7 +126,7 @@ class YtDlpEngine(
                 // Avoid external aria2c when authenticated cookies are active so yt-dlp handles headers/redirects natively.
                 if (spec.useAria2c && cookieFile == null) {
                     addOption("--downloader", "libaria2c.so")
-                    addOption("--external-downloader-args", "aria2c:-x 8 -k 1M")
+                    addOption("--external-downloader-args", "aria2c:-x 8 -k 1M --summary-interval=1")
                 }
 
                 when (spec.mode) {
@@ -171,8 +174,12 @@ class YtDlpEngine(
             }
 
             val recentLines = ArrayDeque<String>(MAX_CAPTURED_LOG_LINES)
+            val progressTracker = YtDlpProgressTracker(
+                expectsSeparateAudioStream = spec.mode != DownloadMode.AUDIO_ONLY
+            )
+            onProgress(-1f, "Resolving media link...")
             val response = try {
-                YoutubeDL.getInstance().execute(request, processId) { progress, etaInSeconds, line ->
+                YoutubeDL.getInstance().execute(request, processId) { _, _, line ->
                     if (line.isNotBlank()) {
                         synchronized(recentLines) {
                             if (recentLines.size >= MAX_CAPTURED_LOG_LINES) {
@@ -180,15 +187,10 @@ class YtDlpEngine(
                             }
                             recentLines.addLast(line)
                         }
+                        progressTracker.onLine(line)?.let { snapshot ->
+                            onProgress(snapshot.percent, snapshot.statusText)
+                        }
                     }
-                    val pct = if (progress >= 0f) progress.coerceIn(0f, 99.5f) else 0f
-                    val etaStr = if (etaInSeconds > 0L) " • ETA ${etaInSeconds}s" else ""
-                    val status = if (line.contains("[Merger]", ignoreCase = true) || line.contains("[ExtractAudio]", ignoreCase = true)) {
-                        "Muxing streams..."
-                    } else {
-                        "Downloading ${pct.toInt()}%$etaStr"
-                    }
-                    onProgress(pct, status)
                 }
             } catch (t: Throwable) {
                 if (t is CancellationException) throw t

@@ -255,7 +255,7 @@ class PipelineOrchestrator(
                     mediaKind = MediaKind.REMOTE_URL.name,
                     lane = JobLane.NETWORK.name,
                     status = JobStatus.DOWNLOADING.name,
-                    progress = 5f,
+                    progress = -1f,
                     statusText = "Fetching playlist tracklist...",
                     pipelineSpecJson = json.encodeToString(baseSpec),
                     groupId = groupId,
@@ -785,7 +785,7 @@ class PipelineOrchestrator(
         if (groupId != null && groupId.startsWith("pl_") && existing.id.endsWith("_expander") && spec.download != null) {
             val expanding = reset.copy(
                 status = JobStatus.DOWNLOADING.name,
-                progress = 5f,
+                progress = -1f,
                 statusText = "Fetching playlist tracklist..."
             )
             jobDao.upsert(expanding)
@@ -1139,14 +1139,15 @@ class PipelineOrchestrator(
             val progressChannel = Channel<Pair<Float, String>>(Channel.CONFLATED)
             val progressPump = launch {
                 for ((pct, msg) in progressChannel) {
-                    val mappedPct = (pct * 0.48f).coerceIn(0f, 48f)
+                    val mappedPct = if (pct < 0f) -1f else (pct * 0.48f).coerceIn(1f, 48f)
+                    val stageMsg = "Step 1/2 • $msg"
                     session.progressDbMutex.withLock {
                         for (id in session.trackedJobIds) {
                             if (activeCoroutines.containsKey(id) && !session.sharedSourceDeferred.isCompleted) {
                                 jobDao.updateProgress(
                                     id = id,
                                     status = JobStatus.DOWNLOADING.name,
-                                    statusText = msg,
+                                    statusText = stageMsg,
                                     progress = mappedPct,
                                     lane = JobLane.NETWORK.name
                                 )
@@ -1184,8 +1185,8 @@ class PipelineOrchestrator(
                                 jobDao.updateProgress(
                                     id = id,
                                     status = JobStatus.DOWNLOADING.name,
-                                    statusText = "Starting shared download...",
-                                    progress = 1f,
+                                    statusText = "Step 1/2 • Connecting & resolving stream...",
+                                    progress = -1f,
                                     lane = JobLane.NETWORK.name
                                 )
                             }
@@ -1294,7 +1295,7 @@ class PipelineOrchestrator(
                     jobDao.updateProgress(
                         id = entity.id,
                         status = JobStatus.PROCESSING.name,
-                        statusText = "Slicing chapter $idxLabel/$totalLabel...",
+                        statusText = "Step 2/2 • Slicing chapter $idxLabel/$totalLabel...",
                         progress = 50f,
                         lane = JobLane.COMPUTE.name
                     )
@@ -1308,7 +1309,7 @@ class PipelineOrchestrator(
                             jobDao.updateProgress(
                                 id = entity.id,
                                 status = JobStatus.PROCESSING.name,
-                                statusText = msg,
+                                statusText = "Step 2/2 • $msg",
                                 progress = mapped,
                                 lane = JobLane.COMPUTE.name
                             )
@@ -1567,13 +1568,19 @@ class PipelineOrchestrator(
         val maxNet = { effectiveMaxNetworkSlots() }
 
         val downloadedFiles = networkPool.withSlots(cost = 1, capacityProvider = maxNet, onPoolChange = { refreshMetrics() }) {
-            jobDao.updateProgress(entity.id, JobStatus.DOWNLOADING.name, "Starting yt-dlp...", 2f, JobLane.NETWORK.name)
+            val initMsg = if (spec.hasTransformStage) "Step 1/2 • Connecting & resolving stream..." else "Connecting & resolving stream..."
+            jobDao.updateProgress(entity.id, JobStatus.DOWNLOADING.name, initMsg, -1f, JobLane.NETWORK.name)
             refreshMetrics()
             withConflatedProgressPump(
                 onTick = { pct, msg ->
                     if (activeCoroutines.containsKey(entity.id)) {
-                        val mappedPct = if (spec.hasTransformStage) pct * 0.55f else pct
-                        jobDao.updateProgress(entity.id, JobStatus.DOWNLOADING.name, msg, mappedPct, JobLane.NETWORK.name)
+                        val mappedPct = when {
+                            pct < 0f -> -1f
+                            spec.hasTransformStage -> (pct * 0.52f).coerceIn(1f, 52f)
+                            else -> pct.coerceIn(1f, 99.5f)
+                        }
+                        val statusLabel = if (spec.hasTransformStage) "Step 1/2 • $msg" else msg
+                        jobDao.updateProgress(entity.id, JobStatus.DOWNLOADING.name, statusLabel, mappedPct, JobLane.NETWORK.name)
                     }
                 }
             ) { emitProgress ->
@@ -1602,11 +1609,11 @@ class PipelineOrchestrator(
                 val weight = computeSlotWeight(probe.mediaKind)
                 val maxCompute = { effectiveMaxComputeSlots() }
                 finalFile = computePool.withSlots(cost = weight, capacityProvider = maxCompute, onPoolChange = { refreshMetrics() }) {
-                    val baseProgress = 55f
+                    val baseProgress = 54f
                     jobDao.updateProgress(
                         entity.id,
                         JobStatus.PROCESSING.name,
-                        "Perceptual forge: ${downloaded.name}...",
+                        "Step 2/2 • Forging ${downloaded.name}...",
                         baseProgress,
                         JobLane.COMPUTE.name
                     )
@@ -1617,8 +1624,8 @@ class PipelineOrchestrator(
                                 jobDao.updateProgress(
                                     entity.id,
                                     JobStatus.PROCESSING.name,
-                                    msg,
-                                    55f + (subPct * 0.43f),
+                                    "Step 2/2 • $msg",
+                                    (54f + (subPct * 0.45f)).coerceIn(54f, 99f),
                                     JobLane.COMPUTE.name
                                 )
                             }
@@ -1841,13 +1848,16 @@ class PipelineOrchestrator(
             return "$cleanCustom.$targetExt"
         }
 
-        val base = originalName.substringBeforeLast('.')
+        val rawBase = originalName.substringBeforeLast('.')
             .replace(Regex("""[^A-Za-z0-9._ -]"""), "_")
             .trim()
+        val suffix = spec.delivery.filenameSuffix.ifBlank { "_forge" }
+        val strippedBase = rawBase
+            .replace(Regex("""${Regex.escape(suffix)}(_\d{1,6})?$"""), "")
+            .trimEnd('_', ' ')
             .take(64)
             .ifBlank { "redfur_media" }
-        val suffix = spec.delivery.filenameSuffix.ifBlank { "_forge" }
-        val cleanBase = if (base.endsWith(suffix)) base else "$base$suffix"
+        val cleanBase = "$strippedBase$suffix"
         val timestamp = (System.currentTimeMillis() % 100_000L)
         return "${cleanBase}_$timestamp.$targetExt"
     }

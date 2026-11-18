@@ -163,6 +163,7 @@ data class ResolvedLinkChipItem(
     val isExpanded: Boolean = false,
     val errorHint: String? = null,
     val userCustomized: Boolean = false,
+    val isCommitted: Boolean = false,
     val chapters: List<ChapterTrackItem> = emptyList(),
     val authRequiredReason: String? = null,
     val authIsPaywall: Boolean = false,

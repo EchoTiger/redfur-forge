@@ -1,5 +1,6 @@
 package com.fissal.forge.ui.screens
 
+import androidx.activity.compose.BackHandler
 import androidx.compose.animation.AnimatedVisibility
 import androidx.compose.foundation.BorderStroke
 import androidx.compose.foundation.background
@@ -12,6 +13,7 @@ import androidx.compose.foundation.layout.FlowRow
 import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
+import androidx.compose.foundation.layout.defaultMinSize
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
@@ -26,14 +28,16 @@ import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.automirrored.rounded.ArrowBack
 import androidx.compose.material.icons.automirrored.rounded.QueueMusic
-import androidx.compose.material.icons.rounded.Bolt
 import androidx.compose.material.icons.rounded.CheckCircle
 import androidx.compose.material.icons.rounded.Clear
 import androidx.compose.material.icons.rounded.Close
+import androidx.compose.material.icons.rounded.CloudDownload
 import androidx.compose.material.icons.rounded.Compare
 import androidx.compose.material.icons.rounded.ContentCopy
 import androidx.compose.material.icons.rounded.ContentPaste
+import androidx.compose.material.icons.rounded.DeleteSweep
 import androidx.compose.material.icons.rounded.Download
 import androidx.compose.material.icons.rounded.ErrorOutline
 import androidx.compose.material.icons.rounded.ExpandLess
@@ -55,7 +59,6 @@ import androidx.compose.material3.FilterChipDefaults
 import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
-import androidx.compose.material3.LinearProgressIndicator
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.OutlinedTextField
@@ -79,8 +82,6 @@ import androidx.compose.ui.text.input.KeyboardType
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import coil.compose.AsyncImage
-import com.fissal.forge.data.local.ForgeJobEntity
-import com.fissal.forge.data.local.JobStatus
 import com.fissal.forge.data.settings.ForgeSettings
 import com.fissal.forge.domain.logic.BitrateBudgetCalculator
 import com.fissal.forge.domain.logic.DeviceCapabilityReport
@@ -92,12 +93,12 @@ import com.fissal.forge.domain.model.DownloadMode
 import com.fissal.forge.domain.model.LinkItemSettings
 import com.fissal.forge.domain.model.LinkResolveState
 import com.fissal.forge.domain.model.ResolvedLinkChipItem
-import com.fissal.forge.domain.model.SponsorBlockCategory
 import com.fissal.forge.domain.model.VideoCodecChoice
 import com.fissal.forge.pipeline.OrchestratorMetrics
 import com.fissal.forge.ui.components.DomainRolePill
 import com.fissal.forge.ui.components.EngineDomain
 import com.fissal.forge.ui.components.ForgeInfoTipButton
+import com.fissal.forge.ui.components.ForgePrimaryButton
 import com.fissal.forge.ui.components.LiveSizeEstimateBadge
 import com.fissal.forge.ui.components.RelayPrimaryButton
 import com.fissal.forge.ui.components.SilenceSkipControlPanel
@@ -126,17 +127,21 @@ import kotlin.math.roundToLong
 @OptIn(ExperimentalLayoutApi::class)
 @Composable
 fun HubScreen(
+    isDownloadWorkspaceOpen: Boolean,
     urlBatchText: String,
     resolvedLinks: List<ResolvedLinkChipItem>,
-    jobs: List<ForgeJobEntity>,
     metrics: OrchestratorMetrics,
     settings: ForgeSettings,
     deviceCapabilities: DeviceCapabilityReport,
+    isUpdatingYtDlp: Boolean,
+    onOpenDownloadWorkspace: () -> Unit,
+    onCloseDownloadWorkspace: () -> Unit,
     onUrlTextChange: (String) -> Unit,
     onPasteClick: () -> Unit,
     onToggleChipExpand: (String) -> Unit,
     onRetryResolveLink: (String) -> Unit,
     onRemoveChip: (String) -> Unit,
+    onClearAllResolvedLinks: () -> Unit,
     onUpdateChipSettings: (String, (LinkItemSettings) -> LinkItemSettings) -> Unit,
     onTogglePlaylistTrack: (String, Int) -> Unit,
     onSetAllPlaylistTracks: (String, Boolean) -> Unit,
@@ -153,9 +158,6 @@ fun HubScreen(
     onQueueBatch: (copyToClipboard: Boolean, saveToDevice: Boolean) -> Unit,
     onPickFilesClick: () -> Unit,
     onOpenSampleLabPicker: () -> Unit,
-    onOpenQueueClick: () -> Unit,
-    onCancelAll: () -> Unit,
-    onRemovePlaylistGroup: (String) -> Unit,
     onPromptSignInForChip: (String) -> Unit
 ) {
     val totalQueuedItems = remember(resolvedLinks) {
@@ -173,6 +175,250 @@ fun HubScreen(
         FilesizeEstimator.estimateBatchLinks(resolvedLinks, settings.defaultVideoCrf)
     }
 
+    if (!isDownloadWorkspaceOpen) {
+        LazyColumn(
+            modifier = Modifier
+                .fillMaxSize()
+                .background(VolcanicObsidian),
+            contentPadding = PaddingValues(16.dp),
+            verticalArrangement = Arrangement.spacedBy(16.dp)
+        ) {
+            item(key = "home_header") {
+                Column(verticalArrangement = Arrangement.spacedBy(4.dp)) {
+                    Text(
+                        text = "Choose a Workflow",
+                        style = MaterialTheme.typography.titleLarge,
+                        fontWeight = FontWeight.Bold,
+                        color = CrispWhite
+                    )
+                    Text(
+                        text = "Download media from links or edit local files on device.",
+                        style = MaterialTheme.typography.bodySmall,
+                        color = SecundaSilver
+                    )
+                }
+            }
+
+            // Primary Hero Button 1: Download Media
+            item(key = "hero_download_media") {
+                WorkshopDomainCard(
+                    domain = EngineDomain.RELAY,
+                    isActive = isUpdatingYtDlp || metrics.activeNetworkCount > 0,
+                    onClick = onOpenDownloadWorkspace,
+                    shape = RoundedCornerShape(20.dp),
+                    contentPadding = PaddingValues(18.dp),
+                    modifier = Modifier.fillMaxWidth()
+                ) {
+                    Column(verticalArrangement = Arrangement.spacedBy(14.dp)) {
+                        Row(
+                            modifier = Modifier.fillMaxWidth(),
+                            verticalAlignment = Alignment.CenterVertically,
+                            horizontalArrangement = Arrangement.spacedBy(14.dp)
+                        ) {
+                            Surface(
+                                color = RelayCard,
+                                border = BorderStroke(1.25.dp, ArcRelayCyan.copy(alpha = 0.65f)),
+                                shape = RoundedCornerShape(16.dp),
+                                modifier = Modifier.size(58.dp)
+                            ) {
+                                Box(contentAlignment = Alignment.Center) {
+                                    Icon(
+                                        imageVector = Icons.Rounded.CloudDownload,
+                                        contentDescription = null,
+                                        tint = ArcRelayCyan,
+                                        modifier = Modifier.size(30.dp)
+                                    )
+                                }
+                            }
+                            Column(
+                                modifier = Modifier.weight(1f),
+                                verticalArrangement = Arrangement.spacedBy(5.dp)
+                            ) {
+                                FlowRow(
+                                    horizontalArrangement = Arrangement.spacedBy(8.dp),
+                                    verticalArrangement = Arrangement.spacedBy(4.dp)
+                                ) {
+                                    Text(
+                                        text = "Download Media",
+                                        style = MaterialTheme.typography.titleLarge,
+                                        fontWeight = FontWeight.Bold,
+                                        color = CrispWhite,
+                                        modifier = Modifier.align(Alignment.CenterVertically)
+                                    )
+                                    DomainRolePill(
+                                        domain = EngineDomain.RELAY,
+                                        label = "Links",
+                                        modifier = Modifier.align(Alignment.CenterVertically)
+                                    )
+                                }
+                                Text(
+                                    text = "Save videos, music, playlists, and chapters from YouTube, SoundCloud, TikTok, and 1,000+ supported sites.",
+                                    style = MaterialTheme.typography.bodySmall,
+                                    color = SecundaSilver
+                                )
+                            }
+                        }
+
+                        if (resolvedLinks.isNotEmpty()) {
+                            Surface(
+                                color = ArcRelayCyan.copy(alpha = 0.14f),
+                                border = BorderStroke(1.dp, ArcRelayCyan.copy(alpha = 0.4f)),
+                                shape = RoundedCornerShape(10.dp)
+                            ) {
+                                Text(
+                                    text = "${resolvedLinks.size} link${if (resolvedLinks.size == 1) "" else "s"} staged and ready",
+                                    style = MaterialTheme.typography.labelMedium,
+                                    color = ArcRelayCyan,
+                                    modifier = Modifier.padding(horizontal = 10.dp, vertical = 5.dp)
+                                )
+                            }
+                        }
+
+                        RelayPrimaryButton(
+                            onClick = onOpenDownloadWorkspace,
+                            text = if (resolvedLinks.isNotEmpty()) {
+                                "Open Link Downloader (${resolvedLinks.size})"
+                            } else {
+                                "Open Link Downloader"
+                            },
+                            icon = Icons.Rounded.Download,
+                            modifier = Modifier.fillMaxWidth()
+                        )
+                    }
+                }
+            }
+
+            // Primary Hero Button 2: Forge Studio
+            item(key = "hero_forge_studio") {
+                WorkshopDomainCard(
+                    domain = EngineDomain.FORGE,
+                    isActive = metrics.activeComputeSlotsUsed > 0,
+                    onClick = onPickFilesClick,
+                    shape = RoundedCornerShape(20.dp),
+                    contentPadding = PaddingValues(18.dp),
+                    modifier = Modifier.fillMaxWidth()
+                ) {
+                    Column(verticalArrangement = Arrangement.spacedBy(14.dp)) {
+                        Row(
+                            modifier = Modifier.fillMaxWidth(),
+                            verticalAlignment = Alignment.CenterVertically,
+                            horizontalArrangement = Arrangement.spacedBy(14.dp)
+                        ) {
+                            Surface(
+                                color = FurnaceCard,
+                                border = BorderStroke(1.25.dp, EmberFlame.copy(alpha = 0.65f)),
+                                shape = RoundedCornerShape(16.dp),
+                                modifier = Modifier.size(58.dp)
+                            ) {
+                                Box(contentAlignment = Alignment.Center) {
+                                    Icon(
+                                        imageVector = Icons.Rounded.Tune,
+                                        contentDescription = null,
+                                        tint = EmberFlame,
+                                        modifier = Modifier.size(30.dp)
+                                    )
+                                }
+                            }
+                            Column(
+                                modifier = Modifier.weight(1f),
+                                verticalArrangement = Arrangement.spacedBy(5.dp)
+                            ) {
+                                FlowRow(
+                                    horizontalArrangement = Arrangement.spacedBy(8.dp),
+                                    verticalArrangement = Arrangement.spacedBy(4.dp)
+                                ) {
+                                    Text(
+                                        text = "Forge Studio",
+                                        style = MaterialTheme.typography.titleLarge,
+                                        fontWeight = FontWeight.Bold,
+                                        color = CrispWhite,
+                                        modifier = Modifier.align(Alignment.CenterVertically)
+                                    )
+                                    DomainRolePill(
+                                        domain = EngineDomain.FORGE,
+                                        label = "Local Edit",
+                                        modifier = Modifier.align(Alignment.CenterVertically)
+                                    )
+                                }
+                                Text(
+                                    text = "Convert formats, shrink to an exact MB cap (AV1/HEVC/Opus), trim with live preview, and crop photos or Camera RAWs.",
+                                    style = MaterialTheme.typography.bodySmall,
+                                    color = SecundaSilver
+                                )
+                            }
+                        }
+
+                        ForgePrimaryButton(
+                            onClick = onPickFilesClick,
+                            text = "Open Forge Studio",
+                            icon = Icons.Rounded.FolderOpen,
+                            modifier = Modifier.fillMaxWidth()
+                        )
+                    }
+                }
+            }
+
+            // Secondary Workshop Utility: Sample Frame Lab
+            item(key = "sample_lab_shortcut") {
+                WorkshopDomainCard(
+                    domain = EngineDomain.DELIVERY,
+                    isActive = false,
+                    onClick = onOpenSampleLabPicker,
+                    shape = RoundedCornerShape(16.dp),
+                    contentPadding = PaddingValues(14.dp),
+                    modifier = Modifier.fillMaxWidth()
+                ) {
+                    Row(
+                        modifier = Modifier.fillMaxWidth(),
+                        verticalAlignment = Alignment.CenterVertically,
+                        horizontalArrangement = Arrangement.spacedBy(12.dp)
+                    ) {
+                        Surface(
+                            color = SlateCard,
+                            border = BorderStroke(1.dp, EmberFlame.copy(alpha = 0.45f)),
+                            shape = RoundedCornerShape(12.dp),
+                            modifier = Modifier.size(44.dp)
+                        ) {
+                            Box(contentAlignment = Alignment.Center) {
+                                Icon(
+                                    imageVector = Icons.Rounded.Compare,
+                                    contentDescription = null,
+                                    tint = EmberFlame,
+                                    modifier = Modifier.size(22.dp)
+                                )
+                            }
+                        }
+                        Column(
+                            modifier = Modifier.weight(1f),
+                            verticalArrangement = Arrangement.spacedBy(2.dp)
+                        ) {
+                            Text(
+                                text = "Sample Frame Lab",
+                                style = MaterialTheme.typography.titleSmall,
+                                fontWeight = FontWeight.SemiBold,
+                                color = CrispWhite
+                            )
+                            Text(
+                                text = "Test multiple codecs & sizes side-by-side before full encoding",
+                                style = MaterialTheme.typography.labelSmall,
+                                color = MutedSteel
+                            )
+                        }
+                        Text(
+                            text = "Launch",
+                            style = MaterialTheme.typography.labelLarge,
+                            color = EmberFlame,
+                            fontWeight = FontWeight.Bold
+                        )
+                    }
+                }
+            }
+        }
+        return
+    }
+
+    BackHandler(onBack = onCloseDownloadWorkspace)
+
     LazyColumn(
         modifier = Modifier
             .fillMaxSize()
@@ -180,27 +426,48 @@ fun HubScreen(
         contentPadding = PaddingValues(16.dp),
         verticalArrangement = Arrangement.spacedBy(14.dp)
     ) {
-        // 1. Visualized Workflow Pipeline Dashboard Card
-        item(key = "workflow_dashboard") {
-            WorkflowPipelineDashboardCard(
-                resolvedLinks = resolvedLinks,
-                jobs = jobs,
-                metrics = metrics,
-                onOpenQueueClick = onOpenQueueClick,
-                onCancelAll = onCancelAll,
-                onRemovePlaylistGroup = onRemovePlaylistGroup
-            )
+        // 1. Downloader Navigation Bar
+        item(key = "downloader_nav") {
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.SpaceBetween,
+                verticalAlignment = Alignment.CenterVertically
+            ) {
+                OutlinedButton(
+                    onClick = onCloseDownloadWorkspace,
+                    shape = RoundedCornerShape(12.dp),
+                    border = BorderStroke(1.dp, SlateOutline),
+                    contentPadding = PaddingValues(horizontal = 12.dp, vertical = 6.dp)
+                ) {
+                    Icon(
+                        imageVector = Icons.AutoMirrored.Rounded.ArrowBack,
+                        contentDescription = null,
+                        tint = SecundaSilver,
+                        modifier = Modifier.size(16.dp)
+                    )
+                    Spacer(Modifier.width(6.dp))
+                    Text("Forge Home", style = MaterialTheme.typography.labelLarge, color = SecundaSilver)
+                }
+
+                OutlinedButton(
+                    onClick = onPickFilesClick,
+                    shape = RoundedCornerShape(12.dp),
+                    border = BorderStroke(1.dp, ForgeBevelOutline),
+                    contentPadding = PaddingValues(horizontal = 12.dp, vertical = 6.dp)
+                ) {
+                    Icon(
+                        imageVector = Icons.Rounded.Tune,
+                        contentDescription = null,
+                        tint = EmberFlame,
+                        modifier = Modifier.size(16.dp)
+                    )
+                    Spacer(Modifier.width(6.dp))
+                    Text("Forge Studio", style = MaterialTheme.typography.labelLarge, color = CrispWhite)
+                }
+            }
         }
 
-        // 2. Local Studio Entry Card (Images, RAW, Audio, Video)
-        item(key = "local_studio_card") {
-            LocalStudioHeroCard(
-                onPickFilesClick = onPickFilesClick,
-                onOpenSampleLabPicker = onOpenSampleLabPicker
-            )
-        }
-
-        // 3. Batch URL Input & Quick Global Batch Presets (Arc-Relay Domain)
+        // 2. Link Input & Quick Presets (Arc-Relay Domain)
         item(key = "batch_url_input") {
             WorkshopDomainCard(
                 domain = EngineDomain.RELAY,
@@ -221,15 +488,15 @@ fun HubScreen(
                                 horizontalArrangement = Arrangement.spacedBy(8.dp)
                             ) {
                                 Text(
-                                    text = "Batch Link Relay",
+                                    text = "Link Downloader",
                                     style = MaterialTheme.typography.titleMedium,
                                     color = CrispWhite,
                                     fontWeight = FontWeight.SemiBold
                                 )
-                                DomainRolePill(domain = EngineDomain.RELAY, label = "Relay Intake")
+                                DomainRolePill(domain = EngineDomain.RELAY, label = "Auto-Resolve")
                             }
                             Text(
-                                text = "Links auto-resolve into smart chips with per-item & bulk rules",
+                                text = "Resolvable links auto-clear from the box and stay staged below",
                                 style = MaterialTheme.typography.bodySmall,
                                 color = MutedSteel
                             )
@@ -267,7 +534,7 @@ fun HubScreen(
                                 IconButton(onClick = onPasteClick) {
                                     Icon(
                                         Icons.Rounded.ContentPaste,
-                                        contentDescription = "Paste clipboard",
+                                        contentDescription = "Paste from clipboard",
                                         tint = ArcRelayCyan
                                     )
                                 }
@@ -275,7 +542,7 @@ fun HubScreen(
                                     IconButton(onClick = { onUrlTextChange("") }) {
                                         Icon(
                                             Icons.Rounded.Clear,
-                                            contentDescription = "Clear links",
+                                            contentDescription = "Clear text box",
                                             tint = MutedSteel
                                         )
                                     }
@@ -295,7 +562,7 @@ fun HubScreen(
                     if (resolvedLinks.isNotEmpty()) {
                         Column(verticalArrangement = Arrangement.spacedBy(6.dp)) {
                             Text(
-                                text = "Quick Batch Presets",
+                                text = "Quick Format Presets",
                                 style = MaterialTheme.typography.labelSmall,
                                 color = SecundaSilver
                             )
@@ -350,8 +617,36 @@ fun HubScreen(
             }
         }
 
-        // 4. Resolved Link Chips List
+        // 3. Staged Resolved Media List
         if (resolvedLinks.isNotEmpty()) {
+            item(key = "staged_header") {
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    horizontalArrangement = Arrangement.SpaceBetween,
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    Text(
+                        text = "Staged Media (${resolvedLinks.size})",
+                        style = MaterialTheme.typography.titleSmall,
+                        fontWeight = FontWeight.SemiBold,
+                        color = CrispWhite
+                    )
+                    TextButton(
+                        onClick = onClearAllResolvedLinks,
+                        contentPadding = PaddingValues(horizontal = 8.dp, vertical = 2.dp)
+                    ) {
+                        Icon(
+                            imageVector = Icons.Rounded.DeleteSweep,
+                            contentDescription = null,
+                            tint = MutedSteel,
+                            modifier = Modifier.size(16.dp)
+                        )
+                        Spacer(Modifier.width(4.dp))
+                        Text("Clear Staged", style = MaterialTheme.typography.labelMedium, color = MutedSteel)
+                    }
+                }
+            }
+
             items(resolvedLinks, key = { it.cleanUrl }) { chip ->
                 ResolvedLinkChipCard(
                     chip = chip,
@@ -377,7 +672,7 @@ fun HubScreen(
                 )
             }
 
-            // 5. Batch Queue Action Bar
+            // 4. Batch Queue Action Bar
             item(key = "batch_actions") {
                 WorkshopDomainCard(
                     domain = EngineDomain.RELAY,
@@ -389,6 +684,7 @@ fun HubScreen(
                         verticalArrangement = Arrangement.spacedBy(10.dp)
                     ) {
                         val hasCustomCap = resolvedLinks.any { (it.settings.targetSizeMb ?: 0.0) > 0.0 }
+                        val hasChapterSplit = resolvedLinks.any { it.settings.splitByChapters && it.chapters.size >= 2 }
                         Row(
                             modifier = Modifier.fillMaxWidth(),
                             horizontalArrangement = Arrangement.SpaceBetween,
@@ -397,8 +693,8 @@ fun HubScreen(
                             Text(
                                 text = buildString {
                                     append("Ready: ${resolvedLinks.size} link${if (resolvedLinks.size == 1) "" else "s"} -> ")
-                                    append("$totalQueuedItems queue job${if (totalQueuedItems == 1) "" else "s"}")
-                                    if (hasCustomCap) append(" • Post-Download Forge")
+                                    append("$totalQueuedItems task${if (totalQueuedItems == 1) "" else "s"}")
+                                    if (hasCustomCap || hasChapterSplit) append(" • Includes Post-Processing")
                                 },
                                 style = MaterialTheme.typography.bodySmall,
                                 color = SecundaSilver,
@@ -409,7 +705,7 @@ fun HubScreen(
                                 LiveSizeEstimateBadge(
                                     estimate = batchEstimate,
                                     domain = EngineDomain.RELAY,
-                                    prefix = "Batch"
+                                    prefix = "Est."
                                 )
                             }
                         }
@@ -422,407 +718,29 @@ fun HubScreen(
                             OutlinedButton(
                                 onClick = { onQueueBatch(true, false) },
                                 enabled = canQueue,
-                                modifier = Modifier.weight(1f),
+                                modifier = Modifier
+                                    .weight(1f)
+                                    .defaultMinSize(minHeight = 48.dp),
                                 border = BorderStroke(1.dp, if (canQueue) RelayBevelOutline else SlateOutline),
                                 colors = ButtonDefaults.outlinedButtonColors(contentColor = SecundaSilver)
                             ) {
                                 Icon(Icons.Rounded.ContentCopy, contentDescription = null, modifier = Modifier.size(16.dp))
                                 Spacer(Modifier.width(6.dp))
-                                Text("Copy Only", maxLines = 1)
+                                Text("Copy Clip", maxLines = 1)
                             }
                             RelayPrimaryButton(
                                 onClick = { onQueueBatch(false, true) },
                                 enabled = canQueue,
-                                text = "Download & Forge ($totalQueuedItems)",
+                                text = if (hasCustomCap || hasChapterSplit) {
+                                    "Download & Forge ($totalQueuedItems)"
+                                } else {
+                                    "Start Download ($totalQueuedItems)"
+                                },
                                 icon = Icons.Rounded.Download,
-                                modifier = Modifier.weight(1.4f)
+                                modifier = Modifier.weight(1.45f)
                             )
                         }
                     }
-                }
-            }
-        }
-    }
-}
-
-@Composable
-private fun WorkflowPipelineDashboardCard(
-    resolvedLinks: List<ResolvedLinkChipItem>,
-    jobs: List<ForgeJobEntity>,
-    metrics: OrchestratorMetrics,
-    onOpenQueueClick: () -> Unit,
-    onCancelAll: () -> Unit,
-    onRemovePlaylistGroup: (String) -> Unit
-) {
-    val resolvingCount = resolvedLinks.count { it.resolveState == LinkResolveState.RESOLVING }
-    val resolvedCount = resolvedLinks.count { it.resolveState == LinkResolveState.RESOLVED }
-    val activeDownloading = jobs.count { it.statusEnum == JobStatus.DOWNLOADING }
-    val activeProcessing = jobs.count { it.statusEnum == JobStatus.PROCESSING }
-    val queuedCount = jobs.count { it.statusEnum == JobStatus.QUEUED }
-
-    val playlistSummaries = remember(jobs) {
-        jobs.filter { !it.groupId.isNullOrBlank() }
-            .groupBy { it.groupId!! }
-            .entries
-            .map { (groupId, groupJobs) ->
-                val done = groupJobs.count { it.statusEnum == JobStatus.COMPLETED }
-                val active = groupJobs.count { it.isActive }
-                val total = (groupJobs.firstOrNull()?.playlistTotal ?: groupJobs.size).coerceAtLeast(groupJobs.size)
-                val progress = if (groupJobs.isEmpty()) 0f else {
-                    groupJobs.sumOf { job ->
-                        when (job.statusEnum) {
-                            JobStatus.COMPLETED -> 1.0
-                            else -> (job.progress.toDouble() / 100.0).coerceIn(0.0, 1.0)
-                        }
-                    }.toFloat() / groupJobs.size.toFloat()
-                }
-                Triple(
-                    groupId,
-                    groupJobs.firstOrNull()?.groupTitle ?: "Playlist",
-                    Triple(done, total, Pair(active, progress))
-                )
-            }
-            .sortedByDescending { it.third.third.first > 0 }
-            .take(3)
-    }
-
-    val dashboardDomain = when {
-        activeProcessing > 0 -> EngineDomain.FORGE
-        activeDownloading > 0 || resolvingCount > 0 -> EngineDomain.RELAY
-        else -> EngineDomain.DELIVERY
-    }
-
-    WorkshopDomainCard(
-        domain = dashboardDomain,
-        isActive = metrics.totalActiveJobs > 0 || resolvingCount > 0,
-        contentPadding = PaddingValues(16.dp)
-    ) {
-        Column(
-            verticalArrangement = Arrangement.spacedBy(12.dp)
-        ) {
-            Row(
-                modifier = Modifier.fillMaxWidth(),
-                horizontalArrangement = Arrangement.SpaceBetween,
-                verticalAlignment = Alignment.CenterVertically
-            ) {
-                Row(
-                    verticalAlignment = Alignment.CenterVertically,
-                    horizontalArrangement = Arrangement.spacedBy(8.dp)
-                ) {
-                    Icon(
-                        imageVector = Icons.Rounded.Bolt,
-                        contentDescription = null,
-                        tint = when (dashboardDomain) {
-                            EngineDomain.FORGE -> EmberFlame
-                            EngineDomain.RELAY -> ArcRelayCyan
-                            EngineDomain.DELIVERY -> SecundaSilver
-                        },
-                        modifier = Modifier.size(20.dp)
-                    )
-                    Column {
-                        Text(
-                            text = "Workflow Dashboard",
-                            style = MaterialTheme.typography.titleMedium,
-                            color = CrispWhite,
-                            fontWeight = FontWeight.SemiBold
-                        )
-                        Text(
-                            text = when {
-                                metrics.totalActiveJobs > 0 ->
-                                    "$activeDownloading relaying • $activeProcessing forging • $queuedCount queued"
-                                jobs.isNotEmpty() -> "${jobs.count { it.statusEnum == JobStatus.COMPLETED }} completed in queue"
-                                else -> "Ready — resolve links or share local files"
-                            },
-                            style = MaterialTheme.typography.labelSmall,
-                            color = MutedSteel
-                        )
-                    }
-                }
-                Row(horizontalArrangement = Arrangement.spacedBy(6.dp)) {
-                    if (metrics.totalActiveJobs > 0) {
-                        TextButton(onClick = onCancelAll) {
-                            Text("Stop All", color = CoralError, style = MaterialTheme.typography.labelMedium)
-                        }
-                    }
-                    OutlinedButton(
-                        onClick = onOpenQueueClick,
-                        contentPadding = PaddingValues(horizontal = 12.dp, vertical = 4.dp),
-                        border = BorderStroke(1.dp, SlateOutline)
-                    ) {
-                        Text("Queue (${jobs.size})", style = MaterialTheme.typography.labelMedium, color = SecundaSilver)
-                    }
-                }
-            }
-
-            // 3-Stage Visual Pipeline Gauge (Relay Intake -> Relay Fetch -> Molten Forge)
-            Row(
-                modifier = Modifier.fillMaxWidth(),
-                horizontalArrangement = Arrangement.spacedBy(8.dp)
-            ) {
-                PipelineStageTile(
-                    modifier = Modifier.weight(1f),
-                    stageTitle = "1. Resolve",
-                    detail = when {
-                        resolvingCount > 0 -> "$resolvingCount resolving"
-                        resolvedCount > 0 -> "$resolvedCount ready"
-                        else -> "Standby"
-                    },
-                    fraction = if (resolvedLinks.isEmpty()) 0f else resolvedCount.toFloat() / resolvedLinks.size.toFloat(),
-                    accent = SecundaSilver
-                )
-                PipelineStageTile(
-                    modifier = Modifier.weight(1f),
-                    stageTitle = "2. Relay",
-                    detail = "${metrics.activeNetworkCount} / ${metrics.maxNetworkSlots} slots",
-                    fraction = if (metrics.maxNetworkSlots <= 0) 0f else
-                        (metrics.activeNetworkCount.toFloat() / metrics.maxNetworkSlots.toFloat()).coerceIn(0f, 1f),
-                    accent = ArcRelayCyan
-                )
-                PipelineStageTile(
-                    modifier = Modifier.weight(1f),
-                    stageTitle = "3. Forge",
-                    detail = "${metrics.activeComputeSlotsUsed} / ${metrics.maxComputeSlots} RAM",
-                    fraction = if (metrics.maxComputeSlots <= 0) 0f else
-                        (metrics.activeComputeSlotsUsed.toFloat() / metrics.maxComputeSlots.toFloat()).coerceIn(0f, 1f),
-                    accent = MoltenEmber
-                )
-            }
-
-            // Active / Recent Playlist Quick Progress Strip
-            if (playlistSummaries.isNotEmpty()) {
-                HorizontalDivider(color = SlateOutline)
-                Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
-                    Text(
-                        text = "Playlists & Chapter Batches",
-                        style = MaterialTheme.typography.labelSmall,
-                        color = SecundaSilver
-                    )
-                    playlistSummaries.forEach { (groupId, title, counts) ->
-                        val (done, total, pair) = counts
-                        val (active, progress) = pair
-                        val isChapterGroup = groupId.startsWith("ch_")
-                        Surface(
-                            color = SlateCard,
-                            shape = RoundedCornerShape(12.dp),
-                            border = BorderStroke(1.dp, SlateOutline),
-                            modifier = Modifier
-                                .fillMaxWidth()
-                                .clickable(onClick = onOpenQueueClick)
-                        ) {
-                            Column(
-                                modifier = Modifier.padding(10.dp),
-                                verticalArrangement = Arrangement.spacedBy(6.dp)
-                            ) {
-                                Row(
-                                    modifier = Modifier.fillMaxWidth(),
-                                    verticalAlignment = Alignment.CenterVertically,
-                                    horizontalArrangement = Arrangement.SpaceBetween
-                                ) {
-                                    Row(
-                                        modifier = Modifier.weight(1f),
-                                        verticalAlignment = Alignment.CenterVertically,
-                                        horizontalArrangement = Arrangement.spacedBy(6.dp)
-                                    ) {
-                                        Icon(
-                                            Icons.AutoMirrored.Rounded.QueueMusic,
-                                            contentDescription = null,
-                                            tint = if (isChapterGroup) ArcRelayCyan else MasserCrimson,
-                                            modifier = Modifier.size(16.dp)
-                                        )
-                                        Text(
-                                            text = title,
-                                            style = MaterialTheme.typography.labelMedium,
-                                            color = CrispWhite,
-                                            maxLines = 1,
-                                            overflow = TextOverflow.Ellipsis
-                                        )
-                                    }
-                                    Row(verticalAlignment = Alignment.CenterVertically) {
-                                        val unitLabel = if (isChapterGroup) "tracks" else "songs"
-                                        Text(
-                                            text = if (active > 0) "$done/$total • ${(progress * 100).toInt()}%" else "$done/$total $unitLabel",
-                                            style = MaterialTheme.typography.labelSmall,
-                                            color = if (done == total && total > 0) EmeraldSuccess else SecundaSilver
-                                        )
-                                        IconButton(
-                                            onClick = { onRemovePlaylistGroup(groupId) },
-                                            modifier = Modifier.size(26.dp)
-                                        ) {
-                                            Icon(
-                                                Icons.Rounded.Close,
-                                                contentDescription = if (isChapterGroup) "Remove chapter batch" else "Remove playlist",
-                                                tint = CoralError,
-                                                modifier = Modifier.size(15.dp)
-                                            )
-                                        }
-                                    }
-                                }
-                                LinearProgressIndicator(
-                                    progress = { progress.coerceIn(0f, 1f) },
-                                    modifier = Modifier
-                                        .fillMaxWidth()
-                                        .height(5.dp)
-                                        .clip(RoundedCornerShape(3.dp)),
-                                    color = if (done == total && total > 0) EmeraldSuccess else if (isChapterGroup) ArcRelayCyan else MasserCrimson,
-                                    trackColor = SlateOutline
-                                )
-                            }
-                        }
-                    }
-                }
-            }
-        }
-    }
-}
-
-@Composable
-private fun PipelineStageTile(
-    modifier: Modifier,
-    stageTitle: String,
-    detail: String,
-    fraction: Float,
-    accent: Color
-) {
-    Surface(
-        modifier = modifier,
-        color = SlateCard,
-        shape = RoundedCornerShape(12.dp),
-        border = BorderStroke(1.dp, SlateOutline)
-    ) {
-        Column(
-            modifier = Modifier.padding(10.dp),
-            verticalArrangement = Arrangement.spacedBy(6.dp)
-        ) {
-            Text(
-                text = stageTitle,
-                style = MaterialTheme.typography.labelMedium,
-                color = CrispWhite,
-                maxLines = 1
-            )
-            Text(
-                text = detail,
-                style = MaterialTheme.typography.labelSmall,
-                color = if (fraction > 0f) accent else MutedSteel,
-                maxLines = 1,
-                overflow = TextOverflow.Ellipsis
-            )
-            LinearProgressIndicator(
-                progress = { fraction.coerceIn(0f, 1f) },
-                modifier = Modifier
-                    .fillMaxWidth()
-                    .height(4.dp)
-                    .clip(RoundedCornerShape(2.dp)),
-                color = accent,
-                trackColor = SlateOutline
-            )
-        }
-    }
-}
-
-@Composable
-private fun LocalStudioHeroCard(
-    onPickFilesClick: () -> Unit,
-    onOpenSampleLabPicker: () -> Unit
-) {
-    WorkshopDomainCard(
-        domain = EngineDomain.FORGE,
-        isActive = false,
-        onClick = onPickFilesClick,
-        contentPadding = PaddingValues(16.dp)
-    ) {
-        Column(verticalArrangement = Arrangement.spacedBy(12.dp)) {
-            Row(
-                modifier = Modifier.fillMaxWidth(),
-                verticalAlignment = Alignment.CenterVertically,
-                horizontalArrangement = Arrangement.spacedBy(14.dp)
-            ) {
-                Surface(
-                    color = FurnaceCard,
-                    border = BorderStroke(1.dp, ForgeBevelOutline),
-                    shape = RoundedCornerShape(14.dp),
-                    modifier = Modifier.size(48.dp)
-                ) {
-                    Box(contentAlignment = Alignment.Center) {
-                        Icon(
-                            imageVector = Icons.Rounded.FolderOpen,
-                            contentDescription = null,
-                            tint = EmberFlame,
-                            modifier = Modifier.size(24.dp)
-                        )
-                    }
-                }
-                Column(modifier = Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(4.dp)) {
-                    Row(
-                        verticalAlignment = Alignment.CenterVertically,
-                        horizontalArrangement = Arrangement.spacedBy(8.dp)
-                    ) {
-                        Text(
-                            text = "Local & RAW Studio",
-                            style = MaterialTheme.typography.titleMedium,
-                            color = CrispWhite,
-                            fontWeight = FontWeight.SemiBold
-                        )
-                        DomainRolePill(domain = EngineDomain.FORGE, label = "Local Forge")
-                    }
-                    Text(
-                        text = "Convert, compress to target MB (AV1/HEVC/Opus), trim & snap-crop photos, RAW, audio, or video",
-                        style = MaterialTheme.typography.bodySmall,
-                        color = MutedSteel
-                    )
-                }
-                Icon(
-                    imageVector = Icons.Rounded.Tune,
-                    contentDescription = "Open Studio",
-                    tint = EmberFlame
-                )
-            }
-
-            Row(
-                modifier = Modifier.fillMaxWidth(),
-                horizontalArrangement = Arrangement.spacedBy(8.dp),
-                verticalAlignment = Alignment.CenterVertically
-            ) {
-                OutlinedButton(
-                    onClick = onPickFilesClick,
-                    shape = RoundedCornerShape(12.dp),
-                    border = BorderStroke(1.dp, ForgeBevelOutline),
-                    contentPadding = PaddingValues(horizontal = 12.dp, vertical = 8.dp),
-                    modifier = Modifier.weight(1f)
-                ) {
-                    Icon(
-                        imageVector = Icons.Rounded.Tune,
-                        contentDescription = null,
-                        tint = SecundaSilver,
-                        modifier = Modifier.size(16.dp)
-                    )
-                    Spacer(Modifier.width(6.dp))
-                    Text(
-                        text = "Open Studio",
-                        style = MaterialTheme.typography.labelLarge,
-                        color = CrispWhite,
-                        maxLines = 1
-                    )
-                }
-                OutlinedButton(
-                    onClick = onOpenSampleLabPicker,
-                    shape = RoundedCornerShape(12.dp),
-                    border = BorderStroke(1.dp, EmberFlame.copy(alpha = 0.65f)),
-                    contentPadding = PaddingValues(horizontal = 12.dp, vertical = 8.dp),
-                    modifier = Modifier.weight(1.15f)
-                ) {
-                    Icon(
-                        imageVector = Icons.Rounded.Compare,
-                        contentDescription = null,
-                        tint = EmberFlame,
-                        modifier = Modifier.size(16.dp)
-                    )
-                    Spacer(Modifier.width(6.dp))
-                    Text(
-                        text = "Sample Frame Lab",
-                        style = MaterialTheme.typography.labelLarge,
-                        color = EmberFlame,
-                        maxLines = 1
-                    )
                 }
             }
         }
@@ -1471,7 +1389,7 @@ private fun ResolvedLinkChipCard(
                     // B. Download Mode & Output Format Controls
                     Column(verticalArrangement = Arrangement.spacedBy(6.dp)) {
                         Text(
-                            text = "Format & Quality",
+                            text = "Output Format & Quality",
                             style = MaterialTheme.typography.labelMedium,
                             color = SecundaSilver
                         )
@@ -1586,9 +1504,9 @@ private fun ResolvedLinkChipCard(
                                     verticalAlignment = Alignment.CenterVertically,
                                     horizontalArrangement = Arrangement.spacedBy(6.dp)
                                 ) {
-                                    DomainRolePill(domain = EngineDomain.FORGE, label = "Forge Cap")
+                                    DomainRolePill(domain = EngineDomain.FORGE, label = "Size Cap")
                                     Text(
-                                        text = "Target Filesize",
+                                        text = "Compress to Target Size",
                                         style = MaterialTheme.typography.labelMedium,
                                         color = CrispWhite
                                     )
@@ -1746,7 +1664,7 @@ private fun ResolvedLinkChipCard(
                     // D. Bulk Propagation Across Similar File Types / Sites / All
                     Column(verticalArrangement = Arrangement.spacedBy(6.dp)) {
                         Text(
-                            text = "Apply This Card's Settings Across Batch",
+                            text = "Apply These Settings to Batch",
                             style = MaterialTheme.typography.labelSmall,
                             color = SecundaSilver
                         )
@@ -1772,7 +1690,7 @@ private fun ResolvedLinkChipCard(
                                     border = BorderStroke(1.dp, SecundaSilver.copy(alpha = 0.5f))
                                 ) {
                                     Text(
-                                        text = "Site: ${chip.host}",
+                                        text = "All on ${chip.host}",
                                         style = MaterialTheme.typography.labelMedium,
                                         color = SecundaSilver
                                     )
@@ -1784,7 +1702,7 @@ private fun ResolvedLinkChipCard(
                                 border = BorderStroke(1.dp, SlateOutline)
                             ) {
                                 Text(
-                                    text = "All Links",
+                                    text = "All Staged Links",
                                     style = MaterialTheme.typography.labelMedium,
                                     color = MutedSteel
                                 )

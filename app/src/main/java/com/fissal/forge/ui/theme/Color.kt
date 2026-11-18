@@ -40,3 +40,8 @@ val NixieAmber = Color(0xFFFF8C1A)
 val NixieFilament = Color(0xFFFFB347)
 val NixieGlassBg = Color(0xFF140E0A)
 val BrassCap = Color(0xFFC68346)
+
+// Queue Task Type Semantic Accents
+val TaskConvertViolet = Color(0xFFA78BFA)
+val TaskTrimTeal = Color(0xFF2DD4BF)
+val TaskCropRose = Color(0xFFF472B6)

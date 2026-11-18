@@ -143,10 +143,16 @@ fun ConnectionsSettingsCard(
                         style = MaterialTheme.typography.titleMedium,
                         color = CrispWhite
                     )
+                    Text(
+                        text = "Sign in or import cookies.txt to unlock private, age-gated, or members-only links.",
+                        style = MaterialTheme.typography.labelSmall,
+                        color = MutedSteel,
+                        modifier = Modifier.padding(top = 2.dp)
+                    )
                     Row(
                         verticalAlignment = Alignment.CenterVertically,
                         horizontalArrangement = Arrangement.spacedBy(5.dp),
-                        modifier = Modifier.padding(top = 2.dp)
+                        modifier = Modifier.padding(top = 4.dp)
                     ) {
                         Icon(
                             imageVector = Icons.Rounded.Lock,
@@ -155,7 +161,7 @@ fun ConnectionsSettingsCard(
                             modifier = Modifier.size(13.dp)
                         )
                         Text(
-                            text = "AES-GCM Keystore encrypted locally",
+                            text = "Encrypted locally in Android Keystore",
                             style = MaterialTheme.typography.labelSmall,
                             color = SecundaSilver
                         )
@@ -164,7 +170,7 @@ fun ConnectionsSettingsCard(
                 Spacer(Modifier.width(8.dp))
                 DomainRolePill(
                     domain = EngineDomain.RELAY,
-                    label = "Encrypted Vault"
+                    label = "Local Vault"
                 )
             }
 
@@ -571,7 +577,7 @@ private fun ConnectedServiceItemCard(
                     }
                     Spacer(Modifier.width(5.dp))
                     Text(
-                        text = if (isChecking) "Checking..." else "Check",
+                        text = if (isChecking) "Verifying..." else "Verify",
                         style = MaterialTheme.typography.labelMedium,
                         color = CrispWhite,
                         maxLines = 1
@@ -593,7 +599,7 @@ private fun ConnectedServiceItemCard(
                     )
                     Spacer(Modifier.width(5.dp))
                     Text(
-                        text = "Re-authenticate",
+                        text = "Sign In Again",
                         style = MaterialTheme.typography.labelMedium,
                         color = CrispWhite,
                         maxLines = 1
@@ -615,7 +621,7 @@ private fun ConnectedServiceItemCard(
                     )
                     Spacer(Modifier.width(5.dp))
                     Text(
-                        text = "Remove",
+                        text = "Disconnect",
                         style = MaterialTheme.typography.labelMedium,
                         color = CoralError,
                         maxLines = 1

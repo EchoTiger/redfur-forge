@@ -19,6 +19,7 @@ import com.fissal.forge.update.AppUpdateManager
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
+import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.launch
 
 class ForgeApplication : Application() {
@@ -89,9 +90,34 @@ class ForgeApplication : Application() {
             runCatching { siteAuthVault.sweepStaleTempCookieFiles() }
         }
 
-        // Warm up yt-dlp/python/ffmpeg extraction asynchronously on IO without blocking cold start
+        // Warm up yt-dlp/python/ffmpeg extraction asynchronously on IO and auto-update yt-dlp
+        // on first launch (and periodic launches when enabled) without blocking cold start.
         appScope.launch {
             runCatching { binaryManager.ensureInitialized() }
+            val initial = runCatching { settingsRepository.settingsFlow.first() }.getOrNull() ?: return@launch
+            val nowMs = System.currentTimeMillis()
+            val needsFirstLaunchUpdate = !initial.ytDlpFirstRunUpdateDone
+            val periodicDue = initial.autoUpdateYtDlpOnLaunch &&
+                (nowMs - initial.lastYtDlpUpdateCheckMs) >= YTDLP_AUTO_UPDATE_INTERVAL_MS
+            if (needsFirstLaunchUpdate || periodicDue) {
+                runCatching {
+                    binaryManager.updateYtDlp(nightly = false)
+                }.onSuccess {
+                    val completedAtMs = System.currentTimeMillis()
+                    runCatching {
+                        settingsRepository.update { prev ->
+                            prev.copy(
+                                ytDlpFirstRunUpdateDone = true,
+                                lastYtDlpUpdateCheckMs = completedAtMs
+                            )
+                        }
+                    }
+                }
+            }
         }
+    }
+
+    companion object {
+        private const val YTDLP_AUTO_UPDATE_INTERVAL_MS = 12L * 3600L * 1000L
     }
 }

@@ -76,6 +76,7 @@ import com.fissal.forge.ui.MainTab
 import com.fissal.forge.ui.components.AuthRequiredPromptDialog
 import com.fissal.forge.ui.components.AuthWebViewDialog
 import com.fissal.forge.ui.components.EmojiPresetPickerDialog
+import com.fissal.forge.ui.components.WorkflowViewportDock
 import com.fissal.forge.ui.screens.FullscreenSampleComparator
 import com.fissal.forge.ui.screens.HubScreen
 import com.fissal.forge.ui.screens.QueueScreen
@@ -117,6 +118,7 @@ class MainActivity : ComponentActivity() {
         setContent {
             RedfurForgeTheme {
                 val selectedTab by viewModel.selectedTab.collectAsState()
+                val isDownloadWorkspaceOpen by viewModel.isDownloadWorkspaceOpen.collectAsState()
                 val settings by viewModel.settings.collectAsState()
                 val jobs by viewModel.jobs.collectAsState()
                 val metrics by viewModel.metrics.collectAsState()
@@ -296,7 +298,22 @@ class MainActivity : ComponentActivity() {
                             onRemoveCandidate = viewModel::removeSampleLabCandidate,
                             onVoteCandidate = viewModel::voteSampleLabCandidate,
                             onUseConfigInStudio = viewModel::useSampleCandidateInStudio,
-                            onClose = viewModel::closeSampleLab
+                            onClose = viewModel::closeSampleLab,
+                            workflowDock = {
+                                WorkflowViewportDock(
+                                    resolvedLinks = resolvedLinks,
+                                    jobs = jobs,
+                                    metrics = metrics,
+                                    isUpdatingYtDlp = isUpdatingYtDlp,
+                                    onOpenQueueClick = {
+                                        viewModel.dismissSampleLabForNavigation()
+                                        viewModel.closeStudioSession()
+                                        viewModel.selectTab(MainTab.QUEUE)
+                                    },
+                                    onCancelAll = viewModel::cancelAllJobs,
+                                    onRemovePlaylistGroup = viewModel::removePlaylistGroup
+                                )
+                            }
                         )
                     } else if (currentStudio != null) {
                         StudioEditorScreen(
@@ -312,7 +329,7 @@ class MainActivity : ComponentActivity() {
                                 )
                             },
                             onUpdate = viewModel::updateStudio,
-                            onSelectTab = viewModel::updateStudioTab,
+                            onToggleSection = viewModel::setStudioSectionEnabled,
                             onToggleSamplePreview = viewModel::toggleSamplePreviewComparison,
                             onOpenSampleLab = viewModel::openSampleLabFromStudio,
                             onApplyPreset = viewModel::applyPresetToStudio,
@@ -328,7 +345,21 @@ class MainActivity : ComponentActivity() {
                             onSelectCropPreset = viewModel::selectStudioCropPreset,
                             onExecute = viewModel::enqueueStudioSession,
                             onRunInBackground = viewModel::moveInlineStudioToBackground,
-                            onClose = viewModel::closeStudioSession
+                            onClose = viewModel::closeStudioSession,
+                            workflowDock = {
+                                WorkflowViewportDock(
+                                    resolvedLinks = resolvedLinks,
+                                    jobs = jobs,
+                                    metrics = metrics,
+                                    isUpdatingYtDlp = isUpdatingYtDlp,
+                                    onOpenQueueClick = {
+                                        viewModel.closeStudioSession()
+                                        viewModel.selectTab(MainTab.QUEUE)
+                                    },
+                                    onCancelAll = viewModel::cancelAllJobs,
+                                    onRemovePlaylistGroup = viewModel::removePlaylistGroup
+                                )
+                            }
                         )
                     } else {
                         Scaffold(
@@ -349,9 +380,9 @@ class MainActivity : ComponentActivity() {
                                             )
                                             Text(
                                                 text = when (selectedTab) {
-                                                    MainTab.FORGE -> "Redfur Forge"
-                                                    MainTab.QUEUE -> "Pipeline Queue"
-                                                    MainTab.SETTINGS -> "Forge Settings"
+                                                    MainTab.FORGE -> if (isDownloadWorkspaceOpen) "Download Media" else "Redfur Forge"
+                                                    MainTab.QUEUE -> "Activity Queue"
+                                                    MainTab.SETTINGS -> "Settings"
                                                 },
                                                 style = MaterialTheme.typography.headlineSmall,
                                                 color = CrispWhite
@@ -429,20 +460,34 @@ class MainActivity : ComponentActivity() {
                                     onDismiss = { tag -> viewModel.dismissUpdateBanner(tag) }
                                 )
 
+                                WorkflowViewportDock(
+                                    resolvedLinks = resolvedLinks,
+                                    jobs = jobs,
+                                    metrics = metrics,
+                                    isUpdatingYtDlp = isUpdatingYtDlp,
+                                    onOpenQueueClick = { viewModel.selectTab(MainTab.QUEUE) },
+                                    onCancelAll = viewModel::cancelAllJobs,
+                                    onRemovePlaylistGroup = viewModel::removePlaylistGroup
+                                )
+
                                 Box(modifier = Modifier.weight(1f)) {
                                     when (selectedTab) {
                                         MainTab.FORGE -> HubScreen(
+                                            isDownloadWorkspaceOpen = isDownloadWorkspaceOpen,
                                             urlBatchText = urlBatchText,
                                             resolvedLinks = resolvedLinks,
-                                            jobs = jobs,
                                             metrics = metrics,
                                             settings = settings,
                                             deviceCapabilities = deviceCapabilities,
-                                            onUrlTextChange = viewModel::updateUrlBatchText,
+                                            isUpdatingYtDlp = isUpdatingYtDlp,
+                                            onOpenDownloadWorkspace = viewModel::openDownloadWorkspace,
+                                            onCloseDownloadWorkspace = viewModel::closeDownloadWorkspace,
+                                            onUrlTextChange = { text -> viewModel.updateUrlBatchText(text) },
                                             onPasteClick = viewModel::pasteUrlsFromClipboard,
                                             onToggleChipExpand = viewModel::toggleLinkChipExpanded,
                                             onRetryResolveLink = viewModel::retryResolveLink,
                                             onRemoveChip = viewModel::removeResolvedLink,
+                                            onClearAllResolvedLinks = viewModel::clearAllResolvedLinks,
                                             onUpdateChipSettings = viewModel::updateLinkChipSettings,
                                             onTogglePlaylistTrack = viewModel::togglePlaylistTrack,
                                             onSetAllPlaylistTracks = viewModel::setAllPlaylistTracks,
@@ -461,9 +506,6 @@ class MainActivity : ComponentActivity() {
                                             onOpenSampleLabPicker = {
                                                 sampleLabFilePicker.launch(arrayOf("video/*", "image/*", "*/*"))
                                             },
-                                            onOpenQueueClick = { viewModel.selectTab(MainTab.QUEUE) },
-                                            onCancelAll = viewModel::cancelAllJobs,
-                                            onRemovePlaylistGroup = viewModel::removePlaylistGroup,
                                             onPromptSignInForChip = viewModel::promptSignInForChip
                                         )
                                         MainTab.QUEUE -> QueueScreen(
@@ -471,6 +513,8 @@ class MainActivity : ComponentActivity() {
                                             metrics = metrics,
                                             onCopyJob = viewModel::copyCompletedJobToClipboard,
                                             onShareJob = viewModel::buildShareIntentForJob,
+                                            onForgeJob = viewModel::openCompletedJobInStudio,
+                                            onForgePlaylistGroup = viewModel::openCompletedGroupInStudio,
                                             onCancelJob = viewModel::cancelJob,
                                             onRetryJob = viewModel::retryJob,
                                             onRemoveJob = viewModel::removeJob,
@@ -609,7 +653,8 @@ class MainActivity : ComponentActivity() {
                 } else if (!sharedText.isNullOrBlank()) {
                     viewModel.dismissSampleLabForNavigation()
                     viewModel.closeStudioSession()
-                    viewModel.updateUrlBatchText(sharedText)
+                    viewModel.openDownloadWorkspace()
+                    viewModel.updateUrlBatchText(sharedText, immediate = true)
                     viewModel.selectTab(MainTab.FORGE)
                 }
             }

@@ -357,6 +357,9 @@ class ForgeViewModel(application: Application) : AndroidViewModel(application) {
     private val _selectedTab = MutableStateFlow(MainTab.FORGE)
     val selectedTab: StateFlow<MainTab> = _selectedTab.asStateFlow()
 
+    private val _isDownloadWorkspaceOpen = MutableStateFlow(false)
+    val isDownloadWorkspaceOpen: StateFlow<Boolean> = _isDownloadWorkspaceOpen.asStateFlow()
+
     private val _urlBatchText = MutableStateFlow("")
     val urlBatchText: StateFlow<String> = _urlBatchText.asStateFlow()
 
@@ -369,15 +372,13 @@ class ForgeViewModel(application: Application) : AndroidViewModel(application) {
     private val metadataCache = ConcurrentHashMap<String, ResolvedUrlMetadata>()
     private val resolveJobs = ConcurrentHashMap<String, Job>()
     private val resolveSemaphore = Semaphore(3)
+    private var urlSyncJob: Job? = null
 
     private val _studioSession = MutableStateFlow<StudioSessionState?>(null)
     val studioSession: StateFlow<StudioSessionState?> = _studioSession.asStateFlow()
 
-    private val _ytDlpVersion = MutableStateFlow(binaryManager.getYtDlpVersionName())
-    val ytDlpVersion: StateFlow<String> = _ytDlpVersion.asStateFlow()
-
-    private val _isUpdatingYtDlp = MutableStateFlow(false)
-    val isUpdatingYtDlp: StateFlow<Boolean> = _isUpdatingYtDlp.asStateFlow()
+    val ytDlpVersion: StateFlow<String> = binaryManager.ytDlpVersionFlow
+    val isUpdatingYtDlp: StateFlow<Boolean> = binaryManager.isUpdatingYtDlpFlow
 
     private val _cacheSizeBytes = MutableStateFlow(orchestrator.totalCacheBytes())
     val cacheSizeBytes: StateFlow<Long> = _cacheSizeBytes.asStateFlow()
@@ -392,6 +393,14 @@ class ForgeViewModel(application: Application) : AndroidViewModel(application) {
         }
     }
 
+    fun openDownloadWorkspace() {
+        _isDownloadWorkspaceOpen.value = true
+    }
+
+    fun closeDownloadWorkspace() {
+        _isDownloadWorkspaceOpen.value = false
+    }
+
     fun clearStatusBanner() {
         _statusBanner.value = null
     }
@@ -400,67 +409,102 @@ class ForgeViewModel(application: Application) : AndroidViewModel(application) {
         _statusBanner.value = message
     }
 
-    fun updateUrlBatchText(newText: String) {
+    fun updateUrlBatchText(newText: String, immediate: Boolean = false) {
         _urlBatchText.value = newText
-        val parsed = UrlBatchParser.extractUrls(newText, settings.value.stripUrlTracking)
+        urlSyncJob?.cancel()
+        val shouldProcessImmediately = immediate ||
+            newText.isBlank() ||
+            newText.endsWith('\n') ||
+            newText.endsWith(' ')
+        if (shouldProcessImmediately) {
+            processUrlInputText(newText)
+        } else {
+            urlSyncJob = viewModelScope.launch {
+                delay(350L)
+                processUrlInputText(newText)
+            }
+        }
+    }
+
+    private fun processUrlInputText(rawText: String) {
+        val parsed = UrlBatchParser.extractUrls(rawText, settings.value.stripUrlTracking)
         _parsedUrls.value = parsed
         syncResolvedLinkChips(parsed)
     }
 
     private fun syncResolvedLinkChips(parsed: List<ParsedUrlItem>) {
         val activeUrlSet = parsed.map { it.cleanUrl }.toSet()
-        // Cancel resolvers for URLs removed from input box
+        // Cancel resolvers for un-committed URLs removed before lookup completed
         resolveJobs.keys.toList().forEach { url ->
             if (url !in activeUrlSet) {
                 resolveJobs.remove(url)?.cancel()
             }
         }
 
-        val existingMap = _resolvedLinks.value.associateBy { it.cleanUrl }
         val curSettings = settings.value
+        val keptExisting = _resolvedLinks.value.filter { chip ->
+            chip.isCommitted ||
+                chip.resolveState == LinkResolveState.RESOLVED ||
+                !chip.authRequiredReason.isNullOrBlank() ||
+                chip.cleanUrl in activeUrlSet
+        }
+        val existingUrlSet = keptExisting.mapTo(HashSet()) { it.cleanUrl }
+        val newlyAdded = ArrayList<ResolvedLinkChipItem>()
+        val cacheMatchedUrls = ArrayList<String>()
 
-        val updatedList = parsed.map { item ->
-            val existing = existingMap[item.cleanUrl]
-            if (existing != null) {
-                existing
+        for (item in parsed) {
+            if (item.cleanUrl in existingUrlSet) continue
+            val cached = metadataCache[item.cleanUrl]
+            if (cached != null) {
+                newlyAdded += buildChipFromMetadata(item, cached, curSettings).copy(isCommitted = true)
+                cacheMatchedUrls += item.cleanUrl
             } else {
-                val cached = metadataCache[item.cleanUrl]
-                if (cached != null) {
-                    buildChipFromMetadata(item, cached, curSettings)
+                val hintKind = YtDlpJsonParser.inferContentMediaHint(item.cleanUrl)
+                val initialMode = if (hintKind == DetectedLinkKind.AUDIO) {
+                    DownloadMode.AUDIO_ONLY
                 } else {
-                    val hintKind = YtDlpJsonParser.inferContentMediaHint(item.cleanUrl)
-                    val initialMode = if (hintKind == DetectedLinkKind.AUDIO) {
-                        DownloadMode.AUDIO_ONLY
-                    } else {
-                        curSettings.defaultDownloadMode
-                    }
-                    val explicitPlaylist = item.cleanUrl.contains("/playlist", ignoreCase = true) ||
-                        item.cleanUrl.contains("/sets/", ignoreCase = true) ||
-                        item.cleanUrl.contains("/album/", ignoreCase = true)
-                    val matchedConnectionId = resolveConnectedSiteId(item.cleanUrl)
-                    ResolvedLinkChipItem(
-                        cleanUrl = item.cleanUrl,
-                        host = item.host,
-                        isPlaylistLikeUrl = item.isPlaylistLike,
-                        resolveState = LinkResolveState.RESOLVING,
-                        detectedKind = if (item.isPlaylistLike) DetectedLinkKind.PLAYLIST else hintKind,
-                        contentMediaKind = hintKind,
-                        settings = LinkItemSettings(
-                            mode = initialMode,
-                            maxHeight = curSettings.defaultMaxVideoHeight.takeIf { it > 0 },
-                            audioFormat = curSettings.defaultAudioFormat,
-                            playlistSingleOnly = if (explicitPlaylist) false else curSettings.playlistSingleOnly,
-                            sponsorBlock = curSettings.defaultSponsorBlockCategories.isNotEmpty(),
-                            embedMetadata = curSettings.embedDownloadMetadata,
-                            sponsorBlockCategories = curSettings.defaultSponsorBlockCategories,
-                            siteConnectionId = matchedConnectionId,
-                            silenceSkip = curSettings.defaultSilenceSkip
-                        )
-                    ).also { launchMetadataResolve(item, matchedConnectionId) }
+                    curSettings.defaultDownloadMode
                 }
+                val explicitPlaylist = item.cleanUrl.contains("/playlist", ignoreCase = true) ||
+                    item.cleanUrl.contains("/sets/", ignoreCase = true) ||
+                    item.cleanUrl.contains("/album/", ignoreCase = true)
+                val matchedConnectionId = resolveConnectedSiteId(item.cleanUrl)
+                newlyAdded += ResolvedLinkChipItem(
+                    cleanUrl = item.cleanUrl,
+                    host = item.host,
+                    isPlaylistLikeUrl = item.isPlaylistLike,
+                    resolveState = LinkResolveState.RESOLVING,
+                    detectedKind = if (item.isPlaylistLike) DetectedLinkKind.PLAYLIST else hintKind,
+                    contentMediaKind = hintKind,
+                    settings = LinkItemSettings(
+                        mode = initialMode,
+                        maxHeight = curSettings.defaultMaxVideoHeight.takeIf { it > 0 },
+                        audioFormat = curSettings.defaultAudioFormat,
+                        playlistSingleOnly = if (explicitPlaylist) false else curSettings.playlistSingleOnly,
+                        sponsorBlock = curSettings.defaultSponsorBlockCategories.isNotEmpty(),
+                        embedMetadata = curSettings.embedDownloadMetadata,
+                        sponsorBlockCategories = curSettings.defaultSponsorBlockCategories,
+                        siteConnectionId = matchedConnectionId,
+                        silenceSkip = curSettings.defaultSilenceSkip
+                    )
+                )
+                existingUrlSet += item.cleanUrl
+                launchMetadataResolve(item, matchedConnectionId)
             }
         }
-        _resolvedLinks.value = updatedList
+
+        _resolvedLinks.value = keptExisting + newlyAdded
+        cacheMatchedUrls.forEach { stripResolvedUrlFromInputBox(it) }
+    }
+
+    private fun stripResolvedUrlFromInputBox(cleanUrl: String) {
+        val stripTracking = settings.value.stripUrlTracking
+        val before = _urlBatchText.value
+        val after = UrlBatchParser.removeResolvedUrlFromText(before, cleanUrl, stripTracking)
+        if (after != before) {
+            _urlBatchText.value = after
+            _parsedUrls.value = UrlBatchParser.extractUrls(after, stripTracking)
+        }
     }
 
     private fun launchMetadataResolve(item: ParsedUrlItem, explicitConnectionId: String? = null) {
@@ -481,12 +525,13 @@ class ForgeViewModel(application: Application) : AndroidViewModel(application) {
                 _resolvedLinks.update { list ->
                     list.map { chip ->
                         if (chip.cleanUrl == item.cleanUrl) {
-                            applyMetadataToExistingChip(chip, meta)
+                            applyMetadataToExistingChip(chip, meta).copy(isCommitted = true)
                         } else {
                             chip
                         }
                     }
                 }
+                stripResolvedUrlFromInputBox(item.cleanUrl)
             } catch (_: CancellationException) {
                 // Removed from input
             } catch (ex: AuthRequiredException) {
@@ -495,6 +540,7 @@ class ForgeViewModel(application: Application) : AndroidViewModel(application) {
                         if (chip.cleanUrl == item.cleanUrl) {
                             chip.copy(
                                 resolveState = LinkResolveState.FAILED,
+                                isCommitted = true,
                                 errorHint = ex.userFacingReason,
                                 authRequiredReason = ex.userFacingReason,
                                 authIsPaywall = ex.isPaywallOrSubscription,
@@ -505,6 +551,7 @@ class ForgeViewModel(application: Application) : AndroidViewModel(application) {
                         }
                     }
                 }
+                stripResolvedUrlFromInputBox(item.cleanUrl)
                 _authPrompt.value = AuthPromptState(
                     service = ex.service ?: ServiceCatalog.matchUrl(item.cleanUrl, siteAuthVault.connectedCustomDomains()),
                     targetUrl = item.cleanUrl,
@@ -624,10 +671,21 @@ class ForgeViewModel(application: Application) : AndroidViewModel(application) {
     }
 
     fun retryResolveLink(cleanUrl: String) {
-        val parsed = _parsedUrls.value.firstOrNull { it.cleanUrl == cleanUrl } ?: return
+        val chip = _resolvedLinks.value.firstOrNull { it.cleanUrl == cleanUrl }
+        val parsed = _parsedUrls.value.firstOrNull { it.cleanUrl == cleanUrl }
+            ?: UrlBatchParser.extractUrls(cleanUrl, stripTracking = false).firstOrNull()
+            ?: if (chip != null) {
+                ParsedUrlItem(
+                    rawUrl = cleanUrl,
+                    cleanUrl = cleanUrl,
+                    isPlaylistLike = chip.isPlaylistLikeUrl,
+                    host = chip.host
+                )
+            } else {
+                return
+            }
         resolveJobs.remove(cleanUrl)?.cancel()
-        val connId = _resolvedLinks.value.firstOrNull { it.cleanUrl == cleanUrl }?.settings?.siteConnectionId
-            ?: resolveConnectedSiteId(cleanUrl)
+        val connId = chip?.settings?.siteConnectionId ?: resolveConnectedSiteId(cleanUrl)
         _resolvedLinks.update { list ->
             list.map {
                 if (it.cleanUrl == cleanUrl) {
@@ -648,11 +706,17 @@ class ForgeViewModel(application: Application) : AndroidViewModel(application) {
 
     fun removeResolvedLink(cleanUrl: String) {
         resolveJobs.remove(cleanUrl)?.cancel()
-        val remaining = _resolvedLinks.value.filterNot { it.cleanUrl == cleanUrl }
-        _resolvedLinks.value = remaining
-        val strippedText = remaining.joinToString("\n") { it.cleanUrl }
-        _urlBatchText.value = strippedText
-        _parsedUrls.value = _parsedUrls.value.filterNot { it.cleanUrl == cleanUrl }
+        _resolvedLinks.update { list -> list.filterNot { it.cleanUrl == cleanUrl } }
+        stripResolvedUrlFromInputBox(cleanUrl)
+    }
+
+    fun clearAllResolvedLinks() {
+        urlSyncJob?.cancel()
+        resolveJobs.values.forEach { it.cancel() }
+        resolveJobs.clear()
+        _urlBatchText.value = ""
+        _parsedUrls.value = emptyList()
+        _resolvedLinks.value = emptyList()
     }
 
     fun updateLinkChipSettings(cleanUrl: String, transform: (LinkItemSettings) -> LinkItemSettings) {
@@ -1115,7 +1179,8 @@ class ForgeViewModel(application: Application) : AndroidViewModel(application) {
             val text = clip.getItemAt(0)?.coerceToText(app)?.toString().orEmpty()
             if (text.isNotBlank()) {
                 val combined = if (_urlBatchText.value.isBlank()) text else "${_urlBatchText.value.trimEnd()}\n$text"
-                updateUrlBatchText(combined)
+                _isDownloadWorkspaceOpen.value = true
+                updateUrlBatchText(combined, immediate = true)
             }
         } else {
             showBanner("Clipboard holds media, not URL text")
@@ -1134,6 +1199,7 @@ class ForgeViewModel(application: Application) : AndroidViewModel(application) {
         val curSettings = settings.value
         viewModelScope.launch {
             val count = orchestrator.enqueueResolvedLinks(chips, saveToDevice, copyToClipboard, curSettings)
+            urlSyncJob?.cancel()
             resolveJobs.values.forEach { it.cancel() }
             resolveJobs.clear()
             _urlBatchText.value = ""
@@ -1297,7 +1363,7 @@ class ForgeViewModel(application: Application) : AndroidViewModel(application) {
             val current = _studioSession.value
             if (current != null &&
                 current.selectedItemIndex == index &&
-                current.activeTab == StudioToolTab.COMPRESS &&
+                current.compressEnabled &&
                 current.primaryItem.isVisual
             ) {
                 scheduleInlineSampleGeneration()
@@ -1385,6 +1451,7 @@ class ForgeViewModel(application: Application) : AndroidViewModel(application) {
 
     fun updateStudio(transform: (StudioItemConfig) -> StudioItemConfig) {
         var shouldRegenerateSample = false
+        var turnedCompressOff = false
         _studioSession.update { state ->
             if (state == null) {
                 null
@@ -1393,52 +1460,40 @@ class ForgeViewModel(application: Application) : AndroidViewModel(application) {
                 val nextState = state.updateActiveConfig(transform)
                 val after = nextState.activeConfig
                 val sampleInputsChanged = before.sampleSignature() != after.sampleSignature()
-                shouldRegenerateSample = sampleInputsChanged &&
-                    nextState.activeTab == StudioToolTab.COMPRESS &&
+                val turnedCompressOn = !before.compressEnabled && after.compressEnabled
+                turnedCompressOff = before.compressEnabled && !after.compressEnabled
+                shouldRegenerateSample = (sampleInputsChanged || turnedCompressOn) &&
+                    after.compressEnabled &&
                     nextState.primaryItem.isVisual
-                if (sampleInputsChanged) {
-                    if (nextState.activeTab == StudioToolTab.COMPRESS) {
-                        nextState.copy(sampleCalibration = null)
-                    } else {
-                        nextState.copy(
-                            originalSampleBitmap = null,
-                            compressedSampleBitmap = null,
-                            showCompressedSample = false,
-                            sampleCalibration = null
-                        )
-                    }
-                } else {
-                    nextState
+                when {
+                    !after.compressEnabled -> nextState.copy(
+                        originalSampleBitmap = null,
+                        compressedSampleBitmap = null,
+                        isGeneratingSample = false,
+                        showCompressedSample = false,
+                        sampleCalibration = null
+                    )
+                    sampleInputsChanged -> nextState.copy(sampleCalibration = null)
+                    else -> nextState
                 }
             }
         }
-        if (shouldRegenerateSample) {
+        if (turnedCompressOff) {
+            samplePreviewJob?.cancel()
+            samplePreviewJob = null
+        } else if (shouldRegenerateSample) {
             scheduleInlineSampleGeneration()
         }
     }
 
-    fun updateStudioTab(tab: StudioToolTab) {
-        var shouldRegenerateSample = false
-        _studioSession.update { state ->
-            if (state == null) {
-                null
-            } else {
-                val next = state.copy(activeTab = tab).updateActiveConfig { cfg ->
-                    when (tab) {
-                        StudioToolTab.CONVERT -> cfg.copy(convertEnabled = true)
-                        StudioToolTab.COMPRESS -> cfg.copy(compressEnabled = true)
-                        StudioToolTab.TRIM -> cfg.copy(trimEnabled = true)
-                        StudioToolTab.CROP -> cfg.copy(cropEnabled = true)
-                    }
-                }
-                shouldRegenerateSample = tab == StudioToolTab.COMPRESS &&
-                    next.primaryItem.isVisual &&
-                    (next.compressedSampleBitmap == null || next.sampleCalibration == null)
-                next
+    fun setStudioSectionEnabled(section: StudioToolTab, enabled: Boolean) {
+        updateStudio { cfg ->
+            when (section) {
+                StudioToolTab.CONVERT -> cfg.copy(convertEnabled = enabled)
+                StudioToolTab.COMPRESS -> cfg.copy(compressEnabled = enabled)
+                StudioToolTab.TRIM -> cfg.copy(trimEnabled = enabled)
+                StudioToolTab.CROP -> cfg.copy(cropEnabled = enabled)
             }
-        }
-        if (shouldRegenerateSample) {
-            scheduleInlineSampleGeneration()
         }
     }
 
@@ -1479,7 +1534,7 @@ class ForgeViewModel(application: Application) : AndroidViewModel(application) {
                 showCompressedSample = false,
                 sampleCalibration = null
             )
-            shouldRegenerateSample = next.activeTab == StudioToolTab.COMPRESS && p.isVisual
+            shouldRegenerateSample = next.compressEnabled && p.isVisual
             next
         }
         if (shouldRegenerateSample) {
@@ -1594,7 +1649,7 @@ class ForgeViewModel(application: Application) : AndroidViewModel(application) {
         samplePreviewJob?.cancel()
         val state = _studioSession.value ?: return
         val item = state.primaryItem
-        if (!item.isVisual || state.activeTab != StudioToolTab.COMPRESS) return
+        if (!item.isVisual || !state.compressEnabled) return
 
         val itemIdx = state.selectedItemIndex
         val cfg = state.activeConfig
@@ -2763,6 +2818,57 @@ class ForgeViewModel(application: Application) : AndroidViewModel(application) {
         }
     }
 
+    fun openCompletedJobInStudio(jobId: String) {
+        val job = jobs.value.firstOrNull { it.id == jobId } ?: return
+        viewModelScope.launch {
+            val uri = withContext(Dispatchers.IO) { resolvePlayableOutputUri(job) }
+            if (uri == null) {
+                showBanner("Output file is no longer available on device")
+                return@launch
+            }
+            initializeStudioSessionForUris(listOf(uri), fromShareIntent = false)
+        }
+    }
+
+    fun openCompletedGroupInStudio(groupId: String) {
+        val completed = jobs.value
+            .filter { it.groupId == groupId && it.statusEnum == com.fissal.forge.data.local.JobStatus.COMPLETED }
+            .sortedWith(compareBy<ForgeJobEntity> { it.playlistIndex ?: Int.MAX_VALUE }.thenBy { it.createdAtMs })
+        if (completed.isEmpty()) {
+            showBanner("No completed items ready to forge yet")
+            return
+        }
+        viewModelScope.launch {
+            val uris = withContext(Dispatchers.IO) {
+                completed.mapNotNull { resolvePlayableOutputUri(it) }
+            }
+            if (uris.isEmpty()) {
+                showBanner("Completed output files are no longer available on device")
+                return@launch
+            }
+            initializeStudioSessionForUris(uris, fromShareIntent = false)
+        }
+    }
+
+    private fun resolvePlayableOutputUri(job: ForgeJobEntity): Uri? {
+        val path = job.outputPath
+        if (!path.isNullOrBlank()) {
+            val f = File(path)
+            if (f.exists() && f.isFile && f.canRead()) {
+                return Uri.fromFile(f)
+            }
+        }
+        val uriStr = job.outputUriString
+        if (!uriStr.isNullOrBlank()) {
+            val parsed = runCatching { Uri.parse(uriStr) }.getOrNull() ?: return null
+            val readable = runCatching {
+                app.contentResolver.openAssetFileDescriptor(parsed, "r")?.use { true } == true
+            }.getOrDefault(false)
+            if (readable) return parsed
+        }
+        return null
+    }
+
     fun buildShareIntentForJob(job: ForgeJobEntity): Intent? {
         val uriStr = job.outputUriString
         val path = job.outputPath
@@ -2827,13 +2933,20 @@ class ForgeViewModel(application: Application) : AndroidViewModel(application) {
     }
 
     fun updateYtDlp(nightly: Boolean) {
-        if (_isUpdatingYtDlp.value) return
+        if (binaryManager.isUpdatingYtDlpFlow.value) return
         viewModelScope.launch {
-            _isUpdatingYtDlp.value = true
             runCatching {
                 binaryManager.updateYtDlp(nightly)
             }.onSuccess { status ->
-                _ytDlpVersion.value = binaryManager.getYtDlpVersionName()
+                if (!nightly) {
+                    val nowMs = System.currentTimeMillis()
+                    settingsRepo.update { prev ->
+                        prev.copy(
+                            ytDlpFirstRunUpdateDone = true,
+                            lastYtDlpUpdateCheckMs = nowMs
+                        )
+                    }
+                }
                 showBanner("yt-dlp update: ${status?.name ?: "Complete"}")
             }.onFailure { err ->
                 val cleanErr = CredentialRedactor.sanitizeDiagnostic(
@@ -2842,7 +2955,6 @@ class ForgeViewModel(application: Application) : AndroidViewModel(application) {
                 ).ifBlank { "Unknown error" }
                 showBanner("yt-dlp update failed: $cleanErr")
             }
-            _isUpdatingYtDlp.value = false
         }
     }
 
