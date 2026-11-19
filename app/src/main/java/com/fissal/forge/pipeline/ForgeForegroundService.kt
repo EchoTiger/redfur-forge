@@ -10,6 +10,7 @@ import android.content.Intent
 import android.content.pm.ServiceInfo
 import android.os.Build
 import android.os.IBinder
+import android.util.Log
 import androidx.core.app.NotificationCompat
 import com.fissal.forge.ForgeApplication
 import com.fissal.forge.MainActivity
@@ -51,6 +52,12 @@ class ForgeForegroundService : Service() {
                 return START_NOT_STICKY
             }
         }
+    }
+
+    override fun onTimeout(startId: Int, fgsType: Int) {
+        Log.w(TAG, "Foreground service timeout reached (type=$fgsType); stopping cleanly.")
+        stopForeground(STOP_FOREGROUND_REMOVE)
+        stopSelf(startId)
     }
 
     private fun startForegroundCompat(notification: Notification) {
@@ -131,6 +138,7 @@ class ForgeForegroundService : Service() {
     }
 
     companion object {
+        private const val TAG = "ForgeForegroundService"
         private const val CHANNEL_ID = "forge_pipeline"
         private const val NOTIFICATION_ID = 4109
 
@@ -157,18 +165,21 @@ class ForgeForegroundService : Service() {
                 putExtra(EXTRA_PROGRESS, progress)
                 putExtra(EXTRA_INDETERMINATE, indeterminate)
             }
-            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
-                context.startForegroundService(intent)
-            } else {
-                context.startService(intent)
+            runCatching {
+                if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+                    context.startForegroundService(intent)
+                } else {
+                    context.startService(intent)
+                }
+            }.onFailure { err ->
+                Log.w(TAG, "Unable to promote/update foreground service (app may be backgrounded): ${err.message}")
             }
         }
 
         fun stop(context: Context) {
-            val intent = Intent(context, ForgeForegroundService::class.java).apply {
-                action = ACTION_STOP
+            runCatching {
+                context.stopService(Intent(context, ForgeForegroundService::class.java))
             }
-            runCatching { context.startService(intent) }
         }
     }
 }

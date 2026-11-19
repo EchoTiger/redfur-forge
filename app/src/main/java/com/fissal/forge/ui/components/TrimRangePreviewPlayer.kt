@@ -46,6 +46,7 @@ import androidx.compose.runtime.Composable
 import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.key
 import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.runtime.mutableLongStateOf
 import androidx.compose.runtime.mutableStateOf
@@ -326,17 +327,19 @@ fun TrimRangePreviewPlayer(
     LaunchedEffect(isPlaying, isPrepared) {
         while (isPlaying && isPrepared) {
             val player = mediaPlayerRef ?: break
-            val pos = runCatching { player.currentPosition.toLong() }.getOrDefault(playheadMs)
-            playheadMs = pos.coerceIn(0L, totalMs)
-            if (pos >= latestEndMs - 20L) {
-                if (loopEnabled && !stopAtRangeEndOnce) {
-                    requestSeek(latestStartMs)
-                } else {
-                    runCatching { player.pause() }
-                    isPlaying = false
-                    stopAtRangeEndOnce = false
-                    requestSeek(latestEndMs)
-                    break
+            if (!isSeeking) {
+                val pos = runCatching { player.currentPosition.toLong() }.getOrDefault(playheadMs)
+                playheadMs = pos.coerceIn(0L, totalMs)
+                if (pos >= latestEndMs - 20L) {
+                    if (loopEnabled && !stopAtRangeEndOnce) {
+                        requestSeek(latestStartMs)
+                    } else {
+                        runCatching { player.pause() }
+                        isPlaying = false
+                        stopAtRangeEndOnce = false
+                        requestSeek(latestEndMs)
+                        break
+                    }
                 }
             }
             delay(50L)
@@ -368,45 +371,47 @@ fun TrimRangePreviewPlayer(
                         .background(VolcanicObsidian),
                     contentAlignment = Alignment.Center
                 ) {
-                    AndroidView(
-                        modifier = Modifier.fillMaxSize(),
-                        factory = { ctx ->
-                            TextureView(ctx).apply {
-                                textureViewRef = this
-                                isOpaque = true
-                                surfaceTextureListener = object : TextureView.SurfaceTextureListener {
-                                    override fun onSurfaceTextureAvailable(
-                                        surfaceTexture: SurfaceTexture,
-                                        width: Int,
-                                        height: Int
-                                    ) {
-                                        val surf = Surface(surfaceTexture)
-                                        activeSurfaceRef?.release()
-                                        activeSurfaceRef = surf
-                                        runCatching { mediaPlayerRef?.setSurface(surf) }
-                                        applyFitTransform(this@apply, width, height, videoW, videoH)
-                                    }
+                    key(probe.uriString) {
+                        AndroidView(
+                            modifier = Modifier.fillMaxSize(),
+                            factory = { ctx ->
+                                TextureView(ctx).apply {
+                                    textureViewRef = this
+                                    isOpaque = true
+                                    surfaceTextureListener = object : TextureView.SurfaceTextureListener {
+                                        override fun onSurfaceTextureAvailable(
+                                            surfaceTexture: SurfaceTexture,
+                                            width: Int,
+                                            height: Int
+                                        ) {
+                                            val surf = Surface(surfaceTexture)
+                                            activeSurfaceRef?.release()
+                                            activeSurfaceRef = surf
+                                            runCatching { mediaPlayerRef?.setSurface(surf) }
+                                            applyFitTransform(this@apply, width, height, videoW, videoH)
+                                        }
 
-                                    override fun onSurfaceTextureSizeChanged(
-                                        surfaceTexture: SurfaceTexture,
-                                        width: Int,
-                                        height: Int
-                                    ) {
-                                        applyFitTransform(this@apply, width, height, videoW, videoH)
-                                    }
+                                        override fun onSurfaceTextureSizeChanged(
+                                            surfaceTexture: SurfaceTexture,
+                                            width: Int,
+                                            height: Int
+                                        ) {
+                                            applyFitTransform(this@apply, width, height, videoW, videoH)
+                                        }
 
-                                    override fun onSurfaceTextureDestroyed(surfaceTexture: SurfaceTexture): Boolean {
-                                        runCatching { mediaPlayerRef?.setSurface(null) }
-                                        activeSurfaceRef?.release()
-                                        activeSurfaceRef = null
-                                        return true
-                                    }
+                                        override fun onSurfaceTextureDestroyed(surfaceTexture: SurfaceTexture): Boolean {
+                                            runCatching { mediaPlayerRef?.setSurface(null) }
+                                            activeSurfaceRef?.release()
+                                            activeSurfaceRef = null
+                                            return true
+                                        }
 
-                                    override fun onSurfaceTextureUpdated(surfaceTexture: SurfaceTexture) = Unit
+                                        override fun onSurfaceTextureUpdated(surfaceTexture: SurfaceTexture) = Unit
+                                    }
                                 }
                             }
-                        }
-                    )
+                        )
+                    }
 
                     if (!isPrepared) {
                         CircularProgressIndicator(

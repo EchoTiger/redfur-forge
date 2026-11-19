@@ -467,6 +467,106 @@ class FFmpegCommandBuilderTest {
         }
     }
 
+    @Test
+    fun fastKeyframeCopyGuardsAudioExtractionMuteGifAndAddsFaststartOnMp4() {
+        // Fast MP4 stream-copy trim emits +faststart
+        val fastMp4 = FFmpegCommandBuilder.buildCommand(
+            "/in.mp4", "/out.mp4", sampleVideo,
+            PipelineSpec(trim = TrimSpec(startMs = 2_000L, endMs = 12_000L, fastKeyframeCopy = true))
+        )
+        assertTrue(fastMp4.contains("-c") && fastMp4.contains("copy"))
+        assertTrue(fastMp4.contains("+faststart"))
+
+        // Extracting MP3 audio from MP4 video with fastKeyframeCopy must NOT stream-copy video into MP3
+        val videoToMp3 = FFmpegCommandBuilder.buildCommand(
+            "/in.mp4", "/out.mp3", sampleVideo,
+            PipelineSpec(
+                convert = ConvertSpec("mp3", VideoCodecChoice.COPY, AudioCodecChoice.MP3),
+                trim = TrimSpec(startMs = 2_000L, endMs = 12_000L, fastKeyframeCopy = true)
+            )
+        )
+        assertFalse(videoToMp3.contains("copy"))
+        assertTrue(videoToMp3.contains("-vn"))
+        assertTrue(videoToMp3.contains("libmp3lame"))
+
+        // Transcoding MP3 -> OPUS with fastKeyframeCopy must transcode instead of stream-copying MP3 into Opus
+        val sampleAudio = sampleVideo.copy(
+            uriString = "file:///clip.mp3",
+            displayName = "clip.mp3",
+            mimeType = "audio/mpeg",
+            extension = "mp3",
+            mediaKind = MediaKind.AUDIO
+        )
+        val mp3ToOpus = FFmpegCommandBuilder.buildCommand(
+            "/clip.mp3", "/out.opus", sampleAudio,
+            PipelineSpec(
+                convert = ConvertSpec("opus", VideoCodecChoice.COPY, AudioCodecChoice.OPUS),
+                trim = TrimSpec(startMs = 1_000L, endMs = 10_000L, fastKeyframeCopy = true)
+            )
+        )
+        assertFalse(mp3ToOpus.contains("copy"))
+        assertTrue(mp3ToOpus.contains("libopus"))
+
+        // Video COPY + Audio MUTE + fastKeyframeCopy must copy video and drop audio (-an)
+        val muteWithCopy = FFmpegCommandBuilder.buildCommand(
+            "/in.mp4", "/out.mp4", sampleVideo,
+            PipelineSpec(
+                convert = ConvertSpec("mp4", VideoCodecChoice.COPY, AudioCodecChoice.MUTE),
+                trim = TrimSpec(startMs = 1_000L, endMs = 10_000L, fastKeyframeCopy = true)
+            )
+        )
+        assertTrue(muteWithCopy.contains("-c:v") && muteWithCopy.contains("copy"))
+        assertTrue(muteWithCopy.contains("-an"))
+
+        // GIF conversion with fastKeyframeCopy must still use palettegen/paletteuse
+        val gifTrim = FFmpegCommandBuilder.buildCommand(
+            "/in.mp4", "/out.gif", sampleVideo,
+            PipelineSpec(
+                convert = ConvertSpec("gif", VideoCodecChoice.COPY, AudioCodecChoice.COPY),
+                trim = TrimSpec(startMs = 1_000L, endMs = 5_000L, fastKeyframeCopy = true)
+            )
+        )
+        assertFalse(gifTrim.contains("copy"))
+        assertTrue(gifTrim.contains("-filter_complex"))
+    }
+
+    @Test
+    fun fadeInOutForcesVideoReencodeWhenVideoCodecIsCopy() {
+        val spec = PipelineSpec(
+            convert = ConvertSpec("mp4", VideoCodecChoice.COPY, AudioCodecChoice.COPY),
+            trim = TrimSpec(startMs = 0L, endMs = 10_000L, fadeInOut = true)
+        )
+        val cmd = FFmpegCommandBuilder.buildCommand("/in.mp4", "/out.mp4", sampleVideo, spec)
+        assertFalse(cmd.contains("copy"))
+        assertTrue(cmd.contains("libx264"))
+        val vfIdx = cmd.indexOf("-vf")
+        assertTrue(vfIdx >= 0 && cmd[vfIdx + 1].contains("fade=t=in"))
+        val afIdx = cmd.indexOf("-af")
+        assertTrue(afIdx >= 0 && cmd[afIdx + 1].contains("afade=t=in"))
+    }
+
+    @Test
+    fun audioOnlySameContainerCopySupportsLosslessMetadataStrip() {
+        val sampleAudio = sampleVideo.copy(
+            uriString = "file:///track.mp3",
+            displayName = "track.mp3",
+            mimeType = "audio/mpeg",
+            extension = "mp3",
+            mediaKind = MediaKind.AUDIO
+        )
+        val cmd = FFmpegCommandBuilder.buildCommand(
+            "/track.mp3", "/out.mp3", sampleAudio,
+            PipelineSpec(
+                convert = ConvertSpec("mp3", VideoCodecChoice.COPY, AudioCodecChoice.COPY),
+                delivery = DeliverySpec(stripMetadata = true)
+            )
+        )
+        assertTrue(cmd.contains("-vn"))
+        assertTrue(cmd.contains("-c:a") && cmd.contains("copy"))
+        assertTrue(cmd.contains("-map_metadata") && cmd.contains("-1"))
+        assertFalse(cmd.contains("libmp3lame"))
+    }
+
     private fun assertMetadataPresent(cmd: List<String>) {
         assertTrue(cmd.contains("title=Night Relay"))
         assertTrue(cmd.contains("artist=Echo"))

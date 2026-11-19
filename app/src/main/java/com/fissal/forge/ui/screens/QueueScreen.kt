@@ -1,6 +1,7 @@
 package com.fissal.forge.ui.screens
 
 import android.content.Intent
+import android.widget.Toast
 import androidx.compose.animation.AnimatedVisibility
 import androidx.compose.foundation.BorderStroke
 import androidx.compose.foundation.background
@@ -336,7 +337,11 @@ fun QueueScreen(
                         onCopyTrack = onCopyJob,
                         onShareTrack = { job ->
                             onShareJob(job)?.let { intent ->
-                                context.startActivity(Intent.createChooser(intent, "Share ${job.title}"))
+                                runCatching {
+                                    context.startActivity(Intent.createChooser(intent, "Share ${job.title}"))
+                                }.onFailure {
+                                    Toast.makeText(context, "No app installed to share this file", Toast.LENGTH_SHORT).show()
+                                }
                             }
                         },
                         onForgeTrack = onForgeJob,
@@ -353,7 +358,11 @@ fun QueueScreen(
                         onCopy = { onCopyJob(entry.job.id) },
                         onShare = {
                             onShareJob(entry.job)?.let { intent ->
-                                context.startActivity(Intent.createChooser(intent, "Share ${entry.job.title}"))
+                                runCatching {
+                                    context.startActivity(Intent.createChooser(intent, "Share ${entry.job.title}"))
+                                }.onFailure {
+                                    Toast.makeText(context, "No app installed to share this file", Toast.LENGTH_SHORT).show()
+                                }
                             }
                         },
                         onForge = { onForgeJob(entry.job.id) },

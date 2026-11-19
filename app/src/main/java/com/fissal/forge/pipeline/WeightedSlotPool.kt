@@ -24,6 +24,14 @@ internal class WeightedSlotPool {
 
     fun currentUsed(): Int = synchronized(lock) { used }
 
+    fun notifyCapacityChanged(newCapacity: Int) {
+        val cap = newCapacity.coerceAtLeast(1)
+        val woke = synchronized(lock) {
+            collectEligibleWaitersLocked(cap)
+        }
+        woke.forEach { it.complete(Unit) }
+    }
+
     suspend fun <T> withSlots(
         cost: Int,
         capacityProvider: () -> Int,

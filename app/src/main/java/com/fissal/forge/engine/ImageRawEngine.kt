@@ -158,11 +158,21 @@ class ImageRawEngine(
         val format = resolveCompressFormat(targetExt)
 
         val maxDimLimit = spec.compress?.maxDimensionPx
-        val useHalfSize = spec.compress?.rawHalfSizeFast == true ||
-            deviceCapabilities.recommendRawHalfSizeByDefault ||
-            (probe.effectiveWidth <= 0 && deviceCapabilities.snapshot.largeHeapMemoryClassMb < 512) ||
-            (maxDimLimit != null && probe.effectiveWidth > 0 && max(probe.effectiveWidth, probe.effectiveHeight) / 2 >= maxDimLimit)
+        val canSafelyHalveForCap = spec.crop == null &&
+            maxDimLimit != null &&
+            probe.effectiveWidth > 0 &&
+            max(probe.effectiveWidth, probe.effectiveHeight) / 2 >= maxDimLimit
+        val useHalfSize = when {
+            spec.compress?.rawHalfSizeFast == true -> true
+            spec.compress != null ->
+                (probe.effectiveWidth <= 0 && deviceCapabilities.snapshot.largeHeapMemoryClassMb < 512) ||
+                    canSafelyHalveForCap
+            else -> deviceCapabilities.recommendRawHalfSizeByDefault ||
+                (probe.effectiveWidth <= 0 && deviceCapabilities.snapshot.largeHeapMemoryClassMb < 512) ||
+                canSafelyHalveForCap
+        }
 
+        var alreadyCropped = false
         var workingBitmap: Bitmap = try {
             if (probe.mediaKind == MediaKind.CAMERA_RAW) {
                 onProgress(15f, "Demosaicing Camera RAW via LibRaw...")
@@ -179,7 +189,15 @@ class ImageRawEngine(
                 }
             } else {
                 onProgress(15f, "Decoding image safely...")
-                decodeRasterSafely(sourceUri, probe, spec.crop, maxDimLimit)
+                val (decoded, didRegionCrop) = decodeRasterWithCropFlag(
+                    uri = sourceUri,
+                    probe = probe,
+                    crop = spec.crop,
+                    maxDimLimit = maxDimLimit,
+                    allowHighResCropHeadroom = true
+                )
+                alreadyCropped = didRegionCrop
+                decoded
             }
         } catch (oom: OutOfMemoryError) {
             System.gc()
@@ -187,8 +205,8 @@ class ImageRawEngine(
         }
 
         try {
-            // For RAW (or if raster wasn't region-cropped yet), apply crop cleanly on upright decoded pixels
-            if (spec.crop != null && (probe.mediaKind == MediaKind.CAMERA_RAW || probe.rotationDegrees != 0)) {
+            // Apply crop cleanly on upright decoded pixels whenever region-decoding wasn't used
+            if (spec.crop != null && !alreadyCropped) {
                 onProgress(55f, "Cropping to ${spec.crop.preset.label}...")
                 val px = AspectRatioSnapper.toEvenPixelCrop(spec.crop.rect, workingBitmap.width, workingBitmap.height)
                 if (px.width < workingBitmap.width || px.height < workingBitmap.height) {

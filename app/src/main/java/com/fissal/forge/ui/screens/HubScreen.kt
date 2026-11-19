@@ -791,6 +791,9 @@ private fun ResolvedLinkChipCard(
     onApplyToAllLinks: () -> Unit
 ) {
     val isPlaylistChip = chip.effectivePlaylistActive
+    val hasPlaylistCapability = chip.tracks.isNotEmpty() ||
+        chip.detectedKind == DetectedLinkKind.PLAYLIST ||
+        chip.isPlaylistLikeUrl
 
     val kindColor = when (chip.detectedKind) {
         DetectedLinkKind.AUDIO -> Color(0xFF4FD1C5)
@@ -1028,7 +1031,7 @@ private fun ResolvedLinkChipCard(
                     HorizontalDivider(color = SlateOutline)
 
                     // A. Playlist Song Visualizer & Track Selection
-                    if (isPlaylistChip) {
+                    if (hasPlaylistCapability) {
                         Surface(
                             color = SlateCard,
                             shape = RoundedCornerShape(12.dp),

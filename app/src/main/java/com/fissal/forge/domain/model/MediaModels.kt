@@ -1,5 +1,6 @@
 package com.fissal.forge.domain.model
 
+import java.util.Locale
 import kotlin.math.abs
 
 enum class MediaKind {
@@ -63,9 +64,9 @@ data class MediaProbeResult(
         val mb = kb / 1024.0
         val gb = mb / 1024.0
         return when {
-            gb >= 1.0 -> String.format("%.2f GB", gb)
-            mb >= 1.0 -> String.format("%.1f MB", mb)
-            kb >= 1.0 -> String.format("%.0f KB", kb)
+            gb >= 1.0 -> String.format(Locale.US, "%.2f GB", gb)
+            mb >= 1.0 -> String.format(Locale.US, "%.1f MB", mb)
+            kb >= 1.0 -> String.format(Locale.US, "%.0f KB", kb)
             else -> "$fileSizeBytes B"
         }
     }
@@ -77,9 +78,9 @@ data class MediaProbeResult(
         val m = (totalSec % 3600L) / 60L
         val s = totalSec % 60L
         return if (h > 0) {
-            String.format("%d:%02d:%02d", h, m, s)
+            String.format(Locale.US, "%d:%02d:%02d", h, m, s)
         } else {
-            String.format("%d:%02d", m, s)
+            String.format(Locale.US, "%d:%02d", m, s)
         }
     }
 }

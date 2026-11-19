@@ -260,4 +260,28 @@ class YtDlpJsonParserTest {
         assertFalse(fallbackUntitled.title.contains("tok123"))
         assertTrue(fallbackUntitled.title.contains("[REDACTED]"))
     }
+
+    @Test
+    fun deselectsDeletedAndPrivateYoutubePlaylistTombstonesWhilePreservingIndices() {
+        val sampleJson = """
+            {
+              "_type": "playlist",
+              "title": "Mixed Playlist",
+              "entries": [
+                {"id": "liveOne11", "title": "Track One", "duration": 120, "ie_key": "Youtube"},
+                {"id": "deadTwo22", "title": "[Deleted video]", "ie_key": "Youtube"},
+                {"id": "privThree", "title": "[Private video]", "ie_key": "Youtube"},
+                {"id": "liveFour4", "title": "Track Four", "duration": 180, "ie_key": "Youtube"}
+              ]
+            }
+        """.trimIndent()
+
+        val result = YtDlpJsonParser.parse("https://www.youtube.com/playlist?list=PL_MIX", sampleJson)
+        assertEquals(4, result.tracks.size)
+        assertTrue(result.tracks[0].selected)
+        assertFalse(result.tracks[1].selected)
+        assertFalse(result.tracks[2].selected)
+        assertTrue(result.tracks[3].selected)
+        assertEquals(4, result.tracks[3].index)
+    }
 }

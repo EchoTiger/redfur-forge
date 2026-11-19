@@ -403,7 +403,8 @@ class MediaProbeEngine(
                             height = s.optInt("height", 0)
                             val tagsRot = s.optJSONObject("tags")?.optString("rotate")?.toIntOrNull()
                             val sideRot = extractSideDataRotation(s)
-                            rotation = abs(tagsRot ?: sideRot ?: 0) % 360
+                            val rawRot = tagsRot ?: sideRot ?: 0
+                            rotation = ((rawRot % 360) + 360) % 360
                             val transfer = s.optString("color_transfer").lowercase(Locale.US)
                             isHdr = transfer.contains("smpte2084") || transfer.contains("arib-std-b67")
                         }

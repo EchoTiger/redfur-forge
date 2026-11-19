@@ -931,13 +931,13 @@ private fun ConvertPanelBody(
                 selected = state.targetExtension == ext,
                 onClick = {
                     val nextVideoCodec = when (ext) {
-                        "webm" -> VideoCodecChoice.VP9
+                        "webm" -> if (state.videoCodec == VideoCodecChoice.AV1) VideoCodecChoice.AV1 else VideoCodecChoice.VP9
                         "mp4" -> if (state.videoCodec == VideoCodecChoice.VP9) VideoCodecChoice.H264 else state.videoCodec
                         else -> state.videoCodec
                     }
                     val nextAudioCodec = when (ext) {
                         "mp3" -> AudioCodecChoice.MP3
-                        "opus" -> AudioCodecChoice.OPUS
+                        "opus", "webm" -> AudioCodecChoice.OPUS
                         "flac" -> AudioCodecChoice.FLAC
                         "wav" -> AudioCodecChoice.WAV
                         else -> AudioCodecChoice.AAC
@@ -960,7 +960,7 @@ private fun ConvertPanelBody(
         }
     }
 
-    if (kind == MediaKind.VIDEO && state.targetExtension in setOf("mp4", "mkv", "mov")) {
+    if (kind == MediaKind.VIDEO && state.targetExtension in setOf("mp4", "mkv", "mov", "webm")) {
         Row(
             modifier = Modifier.fillMaxWidth(),
             horizontalArrangement = Arrangement.SpaceBetween,
@@ -969,13 +969,18 @@ private fun ConvertPanelBody(
             Text("Video Encoder", style = MaterialTheme.typography.labelMedium, color = SecundaSilver)
             ForgeInfoTipButton(topic = SettingTopic.VIDEO_CODEC, capabilityReport = deviceCapabilities)
         }
-        FlowRow(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+        val codecOptions = if (state.targetExtension == "webm") {
+            listOf(VideoCodecChoice.AV1, VideoCodecChoice.VP9)
+        } else {
             listOf(
                 VideoCodecChoice.AV1,
                 VideoCodecChoice.HEVC,
                 VideoCodecChoice.H264,
                 VideoCodecChoice.COPY
-            ).forEach { codec ->
+            )
+        }
+        FlowRow(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+            codecOptions.forEach { codec ->
                 FilterChip(
                     selected = state.videoCodec == codec,
                     onClick = { onUpdate { it.copy(convertEnabled = true, videoCodec = codec) } },

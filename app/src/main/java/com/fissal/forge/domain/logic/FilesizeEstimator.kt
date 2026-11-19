@@ -665,7 +665,7 @@ object FilesizeEstimator {
         val w = postCropW.takeIf { it > 0 } ?: 1280
         val h = postCropH.takeIf { it > 0 } ?: 720
         val maxSide = max(w, h)
-        val gifMaxDim = min(540, requestedMaxDim?.takeIf { it > 0 } ?: 540)
+        val gifMaxDim = requestedMaxDim?.takeIf { it > 0 } ?: 540
         val scale = if (maxSide > gifMaxDim) gifMaxDim.toDouble() / maxSide.toDouble() else 1.0
         val gifPixels = (w * scale) * (h * scale)
         val durSec = (effectiveDurationMs / 1000.0).coerceAtLeast(0.5)

@@ -273,6 +273,16 @@ object FFmpegCommandBuilder {
 
         val isAudioOnly = targetExt in AUDIO_ONLY_EXTENSIONS || probe.mediaKind == MediaKind.AUDIO
         val silenceSpec = spec.silenceSkip?.takeIf { it.enabled } ?: trim?.silenceSkip?.takeIf { it.enabled }
+        val sameContainerOrAuto = convert == null ||
+            convert.targetExtension.isBlank() ||
+            convert.targetExtension.lowercase(Locale.US) == probe.extension.lowercase(Locale.US)
+        val audioStreamCopyCompatible = !isAudioOnly || (probe.mediaKind == MediaKind.AUDIO && sameContainerOrAuto)
+        val containerStreamCopyCompatible = targetExt != "gif" &&
+            (targetExt != "webm" || probe.extension.lowercase(Locale.US) == "webm")
+        val convertStreamCopyCompatible = convert == null || (
+            convert.videoCodec == VideoCodecChoice.COPY &&
+                convert.audioCodec == AudioCodecChoice.COPY
+            )
         val canFastStreamCopyTrim = trim != null &&
             trim.fastKeyframeCopy &&
             crop == null &&
@@ -280,7 +290,9 @@ object FFmpegCommandBuilder {
             !trim.fadeInOut &&
             !trim.muteAudio &&
             silenceSpec == null &&
-            (convert == null || convert.videoCodec == VideoCodecChoice.COPY)
+            audioStreamCopyCompatible &&
+            containerStreamCopyCompatible &&
+            convertStreamCopyCompatible
 
         if (canFastStreamCopyTrim) {
             if (effectiveStartMs > 0L) {
@@ -290,6 +302,9 @@ object FFmpegCommandBuilder {
                 args += listOf("-to", formatSeconds(effectiveEndMs))
             }
             args += listOf("-i", inputPath, "-c", "copy", "-avoid_negative_ts", "make_zero")
+            if (targetExt in setOf("mp4", "m4v", "mov")) {
+                args += listOf("-movflags", "+faststart")
+            }
             if (spec.delivery.stripMetadata) {
                 args += listOf("-map_metadata", "-1")
             } else {
@@ -311,6 +326,7 @@ object FFmpegCommandBuilder {
             buildAudioOnlyArgs(
                 args = args,
                 targetExt = targetExt,
+                sameAudioContainer = probe.mediaKind == MediaKind.AUDIO && sameContainerOrAuto,
                 spec = spec,
                 silenceSpec = silenceSpec,
                 effectiveDurationMs = effectiveDurationMs,
@@ -439,6 +455,7 @@ object FFmpegCommandBuilder {
                 pixelCrop != null ||
                 requestedMaxDim != null ||
                 compress != null ||
+                trim?.fadeInOut == true ||
                 silenceActiveOnVideoAudio
             )
         val effectiveVideoCodec = if (videoCodec == VideoCodecChoice.COPY && (filterRequired || silenceActiveOnVideoAudio)) {
@@ -623,6 +640,7 @@ object FFmpegCommandBuilder {
     private fun buildAudioOnlyArgs(
         args: MutableList<String>,
         targetExt: String,
+        sameAudioContainer: Boolean,
         spec: PipelineSpec,
         silenceSpec: SilenceSkipSpec?,
         effectiveDurationMs: Long,
@@ -632,6 +650,23 @@ object FFmpegCommandBuilder {
         args += "-vn"
         val compress = spec.compress
         val trim = spec.trim
+        val canStreamCopyAudio = spec.convert?.audioCodec == AudioCodecChoice.COPY &&
+            sameAudioContainer &&
+            compress == null &&
+            silenceSpec == null &&
+            trim?.fadeInOut != true &&
+            trim?.muteAudio != true
+
+        if (canStreamCopyAudio) {
+            args += listOf("-c:a", "copy")
+            if (spec.delivery.stripMetadata) {
+                args += listOf("-map_metadata", "-1")
+            } else {
+                appendDeliveryMetadataArgs(args, spec)
+            }
+            return
+        }
+
         val afParts = mutableListOf<String>()
         if (targetExt == "opus" || targetExt == "ogg") {
             afParts += "aresample=48000:resampler=soxr"

@@ -109,4 +109,41 @@ class WeightedSlotPoolTest {
             assertEquals(0, pool.currentUsed())
         }
     }
+
+    @Test
+    fun notifyCapacityChangedWakesQueuedWaitersImmediately() = runBlocking {
+        val pool = WeightedSlotPool()
+        val capacity = AtomicInteger(1)
+        val firstEntered = CompletableDeferred<Unit>()
+        val releaseFirst = CompletableDeferred<Unit>()
+        val secondEntered = CompletableDeferred<Unit>()
+
+        withTimeout(5_000L) {
+            val first = launch(Dispatchers.Default) {
+                pool.withSlots(cost = 1, capacityProvider = { capacity.get() }, onPoolChange = {}) {
+                    firstEntered.complete(Unit)
+                    releaseFirst.await()
+                }
+            }
+            firstEntered.await()
+
+            val second = launch(Dispatchers.Default) {
+                pool.withSlots(cost = 1, capacityProvider = { capacity.get() }, onPoolChange = {}) {
+                    secondEntered.complete(Unit)
+                }
+            }
+
+            delay(30L)
+            assertEquals(1, pool.currentUsed())
+            // Raise capacity while first task is still running; notifyCapacityChanged must wake waiter immediately
+            capacity.set(2)
+            pool.notifyCapacityChanged(2)
+            secondEntered.await()
+
+            releaseFirst.complete(Unit)
+            first.join()
+            second.join()
+            assertEquals(0, pool.currentUsed())
+        }
+    }
 }

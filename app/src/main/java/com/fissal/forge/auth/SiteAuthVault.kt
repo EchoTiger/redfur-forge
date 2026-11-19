@@ -5,13 +5,17 @@ import android.net.Uri
 import android.security.keystore.KeyGenParameterSpec
 import android.security.keystore.KeyProperties
 import android.webkit.CookieManager
+import kotlinx.coroutines.CompletableDeferred
+import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.NonCancellable
+import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.currentCoroutineContext
 import kotlinx.coroutines.ensureActive
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
+import kotlinx.coroutines.launch
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
 import kotlinx.coroutines.withContext
@@ -80,8 +84,10 @@ class SiteAuthVault(context: Context) {
     private val appContext = context.applicationContext
     private val vaultDir = File(appContext.filesDir, "auth_vault")
     private val tmpDir = File(appContext.filesDir, "auth_tmp")
+    private val vaultScope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
     private val vaultMutex = Mutex()
     private val sweepMutex = Mutex()
+    private val initialLoadComplete = CompletableDeferred<Unit>()
     @Volatile
     private var initialSweepDone = false
     private val json = Json {
@@ -93,8 +99,17 @@ class SiteAuthVault(context: Context) {
     val connectionsFlow: StateFlow<List<ConnectedServiceSummary>> = _connectionsFlow.asStateFlow()
 
     init {
-        ensurePrivateDirectories()
-        _connectionsFlow.value = runCatching { scanSummariesLocked() }.getOrDefault(emptyList())
+        vaultScope.launch {
+            try {
+                ensurePrivateDirectories()
+                val loaded = vaultMutex.withLock {
+                    runCatching { scanSummariesLocked() }.getOrDefault(emptyList())
+                }
+                _connectionsFlow.value = loaded
+            } finally {
+                initialLoadComplete.complete(Unit)
+            }
+        }
     }
 
     suspend fun sweepStaleTempCookieFiles() {
@@ -484,6 +499,7 @@ class SiteAuthVault(context: Context) {
         explicitConnectionId: String? = null,
         block: suspend (cookieFile: File?, userAgent: String?) -> T
     ): T {
+        initialLoadComplete.await()
         ensureInitialSweepDone()
         val targetServiceId = withContext(Dispatchers.IO) {
             if (!explicitConnectionId.isNullOrBlank()) {
@@ -569,7 +585,7 @@ class SiteAuthVault(context: Context) {
                 }
             }
             when (code) {
-                in 200..399 -> true to "Session verified (HTTP $code)"
+                in 200..399 -> true to "Cookies active • Site reachable (HTTP $code)"
                 401 -> false to "Site rejected saved session (HTTP 401) — reconnect required"
                 403, 429 -> true to "Cookies active locally (WAF HTTP $code on login check)"
                 else -> true to "Session saved locally (probe HTTP $code)"

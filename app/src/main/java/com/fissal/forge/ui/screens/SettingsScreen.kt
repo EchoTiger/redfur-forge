@@ -2,6 +2,7 @@ package com.fissal.forge.ui.screens
 
 import android.content.Intent
 import android.net.Uri
+import android.widget.Toast
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.foundation.BorderStroke
@@ -35,9 +36,12 @@ import androidx.compose.material3.Surface
 import androidx.compose.material3.Switch
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableFloatStateOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
@@ -47,7 +51,9 @@ import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import com.fissal.forge.auth.ConnectedServiceSummary
+import com.fissal.forge.auth.ServiceCatalog
 import com.fissal.forge.auth.ServiceDescriptor
+import kotlinx.coroutines.delay
 import com.fissal.forge.data.settings.ForgeSettings
 import com.fissal.forge.domain.logic.DeviceCapabilityReport
 import com.fissal.forge.domain.logic.SettingTopic
@@ -110,13 +116,14 @@ fun SettingsScreen(
 ) {
     val context = LocalContext.current
     var activeWebViewService by remember { mutableStateOf<ServiceDescriptor?>(null) }
-    var pendingImportService by remember { mutableStateOf<ServiceDescriptor?>(null) }
+    var pendingImportServiceId by rememberSaveable { mutableStateOf<String?>(null) }
 
     val cookiesPickerLauncher = rememberLauncherForActivityResult(
         contract = ActivityResultContracts.OpenDocument()
     ) { uri ->
-        val targetService = pendingImportService
-        pendingImportService = null
+        val serviceId = pendingImportServiceId
+        pendingImportServiceId = null
+        val targetService = serviceId?.let { ServiceCatalog.findById(it) }
         if (uri != null && targetService != null) {
             onImportCookiesTxt(targetService, uri)
             activeWebViewService = null
@@ -168,7 +175,11 @@ fun SettingsScreen(
                 }
                 AppUpdatePhase.READY_TO_INSTALL -> {
                     statusColor = EmeraldSuccess
-                    statusText = "SHA-256 verified and ready to install (${release?.tagName ?: ""})"
+                    statusText = if (appUpdateState.isSha256Verified) {
+                        "SHA-256 verified and ready to install (${release?.tagName ?: ""})"
+                    } else {
+                        "Update APK ready to install (${release?.tagName ?: ""})"
+                    }
                 }
                 AppUpdatePhase.NEEDS_INSTALL_PERMISSION -> {
                     statusColor = AmberActive
@@ -293,7 +304,11 @@ fun SettingsScreen(
                         OutlinedButton(
                             onClick = {
                                 val targetUrl = release?.htmlUrl?.ifBlank { null } ?: AppUpdateManager.RELEASES_WEB_URL
-                                context.startActivity(Intent(Intent.ACTION_VIEW, Uri.parse(targetUrl)))
+                                runCatching {
+                                    context.startActivity(Intent(Intent.ACTION_VIEW, Uri.parse(targetUrl)))
+                                }.onFailure {
+                                    Toast.makeText(context, "No browser app installed", Toast.LENGTH_SHORT).show()
+                                }
                             },
                             shape = RoundedCornerShape(10.dp),
                             modifier = Modifier.weight(1f)
@@ -325,7 +340,7 @@ fun SettingsScreen(
             checkingServiceId = checkingServiceId,
             onConnectServiceWebView = { svc -> activeWebViewService = svc },
             onImportCookiesTxt = { svc ->
-                pendingImportService = svc
+                pendingImportServiceId = svc.id
                 cookiesPickerLauncher.launch(arrayOf("text/plain", "text/*", "*/*"))
             },
             onCheckConnection = onCheckSiteConnection,
@@ -473,14 +488,23 @@ fun SettingsScreen(
                 }
             }
 
+            var crfSliderDraft by remember(settings.defaultVideoCrf) {
+                mutableFloatStateOf(settings.defaultVideoCrf.toFloat())
+            }
             SettingsHeaderWithTip(
-                label = "Default Video Quality (CRF): ${settings.defaultVideoCrf}",
+                label = "Default Video Quality (CRF): ${crfSliderDraft.roundToInt()}",
                 topic = SettingTopic.CRF_SLIDER,
                 capabilityReport = deviceCapabilities
             )
             Slider(
-                value = settings.defaultVideoCrf.toFloat(),
-                onValueChange = { v -> onUpdateSettings { it.copy(defaultVideoCrf = v.roundToInt()) } },
+                value = crfSliderDraft,
+                onValueChange = { crfSliderDraft = it },
+                onValueChangeFinished = {
+                    val committed = crfSliderDraft.roundToInt()
+                    if (committed != settings.defaultVideoCrf) {
+                        onUpdateSettings { it.copy(defaultVideoCrf = committed) }
+                    }
+                },
                 valueRange = 16f..34f
             )
 
@@ -575,14 +599,23 @@ fun SettingsScreen(
                 capabilityReport = deviceCapabilities
             )
 
+            var concurrentDownloadsDraft by remember(settings.maxConcurrentDownloads) {
+                mutableFloatStateOf(settings.maxConcurrentDownloads.toFloat())
+            }
             SettingsHeaderWithTip(
-                label = "Simultaneous Downloads: ${settings.maxConcurrentDownloads}",
+                label = "Simultaneous Downloads: ${concurrentDownloadsDraft.roundToInt()}",
                 topic = SettingTopic.CONCURRENCY_SLOTS,
                 capabilityReport = deviceCapabilities
             )
             Slider(
-                value = settings.maxConcurrentDownloads.toFloat(),
-                onValueChange = { v -> onUpdateSettings { it.copy(maxConcurrentDownloads = v.roundToInt()) } },
+                value = concurrentDownloadsDraft,
+                onValueChange = { concurrentDownloadsDraft = it },
+                onValueChangeFinished = {
+                    val committed = concurrentDownloadsDraft.roundToInt()
+                    if (committed != settings.maxConcurrentDownloads) {
+                        onUpdateSettings { it.copy(maxConcurrentDownloads = committed) }
+                    }
+                },
                 valueRange = 1f..5f,
                 steps = 3
             )
@@ -611,9 +644,21 @@ fun SettingsScreen(
                 }
             }
 
+            var suffixDraft by remember { mutableStateOf(settings.filenameSuffix) }
+            LaunchedEffect(settings.filenameSuffix) {
+                if (settings.filenameSuffix != suffixDraft) {
+                    suffixDraft = settings.filenameSuffix
+                }
+            }
+            LaunchedEffect(suffixDraft) {
+                if (suffixDraft != settings.filenameSuffix) {
+                    delay(350L)
+                    onUpdateSettings { it.copy(filenameSuffix = suffixDraft) }
+                }
+            }
             OutlinedTextField(
-                value = settings.filenameSuffix,
-                onValueChange = { txt -> onUpdateSettings { it.copy(filenameSuffix = txt.take(16)) } },
+                value = suffixDraft,
+                onValueChange = { txt -> suffixDraft = txt.take(16) },
                 label = { Text("Exported Filename Suffix") },
                 singleLine = true,
                 modifier = Modifier.fillMaxWidth()
@@ -687,7 +732,7 @@ fun SettingsScreen(
                 onCaptureWebViewSession(resolvedService, ua, visitedUrls)
             },
             onImportCookiesClick = { resolvedService ->
-                pendingImportService = resolvedService
+                pendingImportServiceId = resolvedService.id
                 cookiesPickerLauncher.launch(arrayOf("text/plain", "text/*", "*/*"))
             }
         )

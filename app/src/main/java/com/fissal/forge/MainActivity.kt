@@ -60,6 +60,7 @@ import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
@@ -68,6 +69,7 @@ import androidx.compose.ui.res.painterResource
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.core.content.ContextCompat
+import com.fissal.forge.auth.ServiceCatalog
 import com.fissal.forge.auth.ServiceDescriptor
 import com.fissal.forge.domain.model.MediaKind
 import com.fissal.forge.domain.model.PipelineSpec
@@ -113,7 +115,9 @@ class MainActivity : ComponentActivity() {
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         enableEdgeToEdge()
-        handleIncomingIntent(intent)
+        if (savedInstanceState == null) {
+            handleIncomingIntent(intent)
+        }
 
         setContent {
             RedfurForgeTheme {
@@ -139,7 +143,7 @@ class MainActivity : ComponentActivity() {
 
                 val snackbarHostState = remember { SnackbarHostState() }
 
-                val notificationPermissionLauncher = rememberLauncherForActivityResult(
+                val permissionLauncher = rememberLauncherForActivityResult(
                     contract = ActivityResultContracts.RequestPermission()
                 ) { _ -> }
 
@@ -148,7 +152,10 @@ class MainActivity : ComponentActivity() {
                 ) {
                     if (packageManager.canRequestPackageInstalls()) {
                         when (val action = viewModel.prepareAppUpdateInstall()) {
-                            is AppUpdateManager.InstallAction.LaunchInstaller -> startActivity(action.intent)
+                            is AppUpdateManager.InstallAction.LaunchInstaller -> {
+                                runCatching { startActivity(action.intent) }
+                                    .onFailure { viewModel.showBanner("Unable to launch Android installer") }
+                            }
                             is AppUpdateManager.InstallAction.MissingApk -> viewModel.showBanner(action.reason)
                             is AppUpdateManager.InstallAction.RequestUnknownSourcesPermission -> Unit
                         }
@@ -159,9 +166,14 @@ class MainActivity : ComponentActivity() {
 
                 fun launchOrRequestInstall() {
                     when (val action = viewModel.prepareAppUpdateInstall()) {
-                        is AppUpdateManager.InstallAction.LaunchInstaller -> startActivity(action.intent)
-                        is AppUpdateManager.InstallAction.RequestUnknownSourcesPermission ->
-                            unknownSourcesLauncher.launch(action.intent)
+                        is AppUpdateManager.InstallAction.LaunchInstaller -> {
+                            runCatching { startActivity(action.intent) }
+                                .onFailure { viewModel.showBanner("Unable to launch Android installer") }
+                        }
+                        is AppUpdateManager.InstallAction.RequestUnknownSourcesPermission -> {
+                            runCatching { unknownSourcesLauncher.launch(action.intent) }
+                                .onFailure { viewModel.showBanner("Unable to open install permission settings") }
+                        }
                         is AppUpdateManager.InstallAction.MissingApk -> viewModel.showBanner(action.reason)
                     }
                 }
@@ -173,7 +185,15 @@ class MainActivity : ComponentActivity() {
                             Manifest.permission.POST_NOTIFICATIONS
                         ) == PackageManager.PERMISSION_GRANTED
                         if (!granted) {
-                            notificationPermissionLauncher.launch(Manifest.permission.POST_NOTIFICATIONS)
+                            permissionLauncher.launch(Manifest.permission.POST_NOTIFICATIONS)
+                        }
+                    } else if (Build.VERSION.SDK_INT <= Build.VERSION_CODES.P) {
+                        val granted = ContextCompat.checkSelfPermission(
+                            this@MainActivity,
+                            Manifest.permission.WRITE_EXTERNAL_STORAGE
+                        ) == PackageManager.PERMISSION_GRANTED
+                        if (!granted) {
+                            permissionLauncher.launch(Manifest.permission.WRITE_EXTERNAL_STORAGE)
                         }
                     }
                 }
@@ -234,16 +254,21 @@ class MainActivity : ComponentActivity() {
                 var activeAuthWebViewSession by remember {
                     mutableStateOf<Triple<ServiceDescriptor, String?, String?>?>(null)
                 }
-                var pendingAuthCookieImport by remember {
-                    mutableStateOf<Triple<ServiceDescriptor, String?, String?>?>(null)
-                }
+                var pendingAuthCookieServiceId by rememberSaveable { mutableStateOf<String?>(null) }
+                var pendingAuthCookieRetryUrl by rememberSaveable { mutableStateOf<String?>(null) }
+                var pendingAuthCookieRetryJobId by rememberSaveable { mutableStateOf<String?>(null) }
                 val authCookiesPickerLauncher = rememberLauncherForActivityResult(
                     contract = ActivityResultContracts.OpenDocument()
                 ) { uri ->
-                    val target = pendingAuthCookieImport
-                    pendingAuthCookieImport = null
-                    if (uri != null && target != null) {
-                        viewModel.importCookiesForService(target.first, uri, target.second, target.third)
+                    val serviceId = pendingAuthCookieServiceId
+                    val retryUrl = pendingAuthCookieRetryUrl
+                    val retryJobId = pendingAuthCookieRetryJobId
+                    pendingAuthCookieServiceId = null
+                    pendingAuthCookieRetryUrl = null
+                    pendingAuthCookieRetryJobId = null
+                    val targetService = serviceId?.let { ServiceCatalog.findById(it) }
+                    if (uri != null && targetService != null) {
+                        viewModel.importCookiesForService(targetService, uri, retryUrl, retryJobId)
                         activeAuthWebViewSession = null
                     }
                 }
@@ -570,11 +595,9 @@ class MainActivity : ComponentActivity() {
                                     )
                                 },
                                 onImportCookiesTxt = { resolvedService ->
-                                    pendingAuthCookieImport = Triple(
-                                        resolvedService,
-                                        currentPrompt.retryCleanUrl,
-                                        currentPrompt.retryJobId
-                                    )
+                                    pendingAuthCookieServiceId = resolvedService.id
+                                    pendingAuthCookieRetryUrl = currentPrompt.retryCleanUrl
+                                    pendingAuthCookieRetryJobId = currentPrompt.retryJobId
                                     authCookiesPickerLauncher.launch(arrayOf("text/plain", "text/*", "*/*"))
                                 },
                                 onOpenExternalApp = { targetUrl ->
@@ -596,7 +619,9 @@ class MainActivity : ComponentActivity() {
                                     viewModel.completeWebViewSignIn(resolvedService, ua, visitedUrls, retryUrl, retryJobId)
                                 },
                                 onImportCookiesClick = { resolvedService ->
-                                    pendingAuthCookieImport = Triple(resolvedService, retryUrl, retryJobId)
+                                    pendingAuthCookieServiceId = resolvedService.id
+                                    pendingAuthCookieRetryUrl = retryUrl
+                                    pendingAuthCookieRetryJobId = retryJobId
                                     authCookiesPickerLauncher.launch(arrayOf("text/plain", "text/*", "*/*"))
                                 }
                             )
@@ -668,21 +693,34 @@ class MainActivity : ComponentActivity() {
     }
 
     private fun extractStreamUri(intent: Intent): Uri? {
-        return if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
+        val extra = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
             intent.getParcelableExtra(Intent.EXTRA_STREAM, Uri::class.java)
         } else {
             @Suppress("DEPRECATION")
             intent.getParcelableExtra(Intent.EXTRA_STREAM)
         }
+        if (extra != null) return extra
+        val clip = intent.clipData ?: return null
+        for (i in 0 until clip.itemCount) {
+            clip.getItemAt(i)?.uri?.let { return it }
+        }
+        return null
     }
 
     private fun extractStreamUriList(intent: Intent): List<Uri> {
-        return if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
+        val extras = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
             intent.getParcelableArrayListExtra(Intent.EXTRA_STREAM, Uri::class.java) ?: emptyList()
         } else {
             @Suppress("DEPRECATION")
             intent.getParcelableArrayListExtra<Uri>(Intent.EXTRA_STREAM) ?: emptyList()
         }
+        if (extras.isNotEmpty()) return extras
+        val clip = intent.clipData ?: return emptyList()
+        val result = ArrayList<Uri>(clip.itemCount)
+        for (i in 0 until clip.itemCount) {
+            clip.getItemAt(i)?.uri?.let { result += it }
+        }
+        return result
     }
 }
 
@@ -756,7 +794,11 @@ private fun AppUpdateBanner(
                                     String.format(Locale.US, "%.1f MB", dlMb)
                                 }
                             }
-                            AppUpdatePhase.READY_TO_INSTALL -> "Verified SHA-256 • Tap to apply"
+                            AppUpdatePhase.READY_TO_INSTALL -> if (updateState.isSha256Verified) {
+                                "Verified SHA-256 • Tap to apply"
+                            } else {
+                                "Update APK staged • Tap to apply"
+                            }
                             AppUpdatePhase.NEEDS_INSTALL_PERMISSION -> "Allow installs from Redfur Forge"
                             else -> release?.selectedAsset?.name ?: "GitHub Release"
                         }

@@ -32,6 +32,10 @@ class NativeBinaryManager(private val appContext: Context) {
     @Volatile
     private var initialized = false
 
+    @Volatile
+    var isAria2cAvailable: Boolean = false
+        private set
+
     private val _ytDlpVersionFlow = MutableStateFlow(readInitialVersionLabel())
     val ytDlpVersionFlow: StateFlow<String> = _ytDlpVersionFlow.asStateFlow()
 
@@ -61,8 +65,12 @@ class NativeBinaryManager(private val appContext: Context) {
             withContext(Dispatchers.IO) {
                 YoutubeDL.getInstance().init(appContext)
                 FFmpeg.getInstance().init(appContext)
-                runCatching { Aria2c.getInstance().init(appContext) }
-                    .onFailure { Log.w(TAG, "Optional aria2c init skipped: ${it.message}") }
+                isAria2cAvailable = runCatching {
+                    Aria2c.getInstance().init(appContext)
+                    true
+                }.onFailure {
+                    Log.w(TAG, "Optional aria2c init skipped: ${it.message}")
+                }.getOrDefault(false)
                 syncBundledYtDlpIfNewer()
                 initialized = true
                 _ytDlpVersionFlow.value = getYtDlpVersionName()

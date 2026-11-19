@@ -104,11 +104,22 @@ class FFmpegCliEngine(
         val silenceSpec = spec.silenceSkip?.takeIf { it.enabled } ?: spec.trim?.silenceSkip?.takeIf { it.enabled }
         val silenceTouchesMedia = silenceSpec != null && (probe.mediaKind == MediaKind.AUDIO || probe.hasAudio)
 
+        val maxDimRequested = spec.compress?.maxDimensionPx?.takeIf { it > 0 }
+        val requiresDownscale = maxDimRequested != null &&
+            probe.effectiveWidth > 0 &&
+            probe.effectiveHeight > 0 &&
+            max(probe.effectiveWidth, probe.effectiveHeight) > maxDimRequested
+        val mutesExistingAudio = probe.hasAudio &&
+            (spec.trim?.muteAudio == true || spec.convert?.audioCodec == AudioCodecChoice.MUTE)
+
         // Zero-loss passthrough if the file already fits the target byte limit and needs no edits
         if (targetBytes != null &&
             spec.trim == null &&
             spec.crop == null &&
             !silenceTouchesMedia &&
+            !spec.delivery.stripMetadata &&
+            !requiresDownscale &&
+            !mutesExistingAudio &&
             inputFile.exists() &&
             inputFile.length() in 1L..targetBytes &&
             (desiredExt.isBlank() || desiredExt == inputExt)
@@ -180,11 +191,26 @@ class FFmpegCliEngine(
             if (err is CancellationException) throw err
             val chosenCodec = FFmpegCommandBuilder.resolveEffectiveVideoCodec(probe, activeSpec)
             if (chosenCodec == VideoCodecChoice.AV1) {
-                onProgress(5f, "Switching to 2-pass HEVC fallback...")
+                val isWebm = desiredExt == "webm"
+                val fallbackVideo = if (isWebm) VideoCodecChoice.VP9 else VideoCodecChoice.HEVC
+                val preservedMute = activeSpec.convert?.audioCodec == AudioCodecChoice.MUTE ||
+                    activeSpec.trim?.muteAudio == true
+                val fallbackAudio = when {
+                    preservedMute -> AudioCodecChoice.MUTE
+                    isWebm -> AudioCodecChoice.OPUS
+                    else -> AudioCodecChoice.AAC
+                }
+                onProgress(
+                    5f,
+                    if (isWebm) "Switching to VP9 WebM fallback..." else "Switching to 2-pass HEVC fallback..."
+                )
                 activeSpec = activeSpec.copy(
                     convert = (activeSpec.convert ?: ConvertSpec(targetExtension = desiredExt.ifBlank { "mp4" }))
-                        .copy(videoCodec = VideoCodecChoice.HEVC, audioCodec = AudioCodecChoice.AAC),
-                    compress = activeSpec.compress?.copy(tier = CompressionTier.TWO_PASS_HEVC, twoPass = true)
+                        .copy(videoCodec = fallbackVideo, audioCodec = fallbackAudio),
+                    compress = activeSpec.compress?.copy(
+                        tier = if (isWebm) activeSpec.compress!!.tier else CompressionTier.TWO_PASS_HEVC,
+                        twoPass = !isWebm
+                    )
                 )
                 runEncodeStrategy(
                     inputFile = inputFile,
@@ -209,21 +235,30 @@ class FFmpegCliEngine(
             val correction = (targetBytes.toDouble() / actualBytes.toDouble()) * 0.94
             val tempCorrected = File(outputFile.parentFile, "retry_${outputFile.name}")
             onProgress(10f, "Refining bitrate to guarantee target MB cap...")
-            runEncodeStrategy(
-                inputFile = inputFile,
-                outputFile = tempCorrected,
-                probe = probe,
-                spec = activeSpec,
-                threadCount = threadCount,
-                bitrateMultiplier = correction.coerceIn(0.25, 0.93),
-                effectiveDurationMs = effectiveDurationMs,
-                complexityFactor = complexityFactor,
-                keepSegmentsMs = keepSegmentsMs,
-                onProgress = onProgress
-            )
-            if (tempCorrected.exists()) {
-                outputFile.delete()
-                tempCorrected.renameTo(outputFile)
+            try {
+                runEncodeStrategy(
+                    inputFile = inputFile,
+                    outputFile = tempCorrected,
+                    probe = probe,
+                    spec = activeSpec,
+                    threadCount = threadCount,
+                    bitrateMultiplier = correction.coerceIn(0.25, 0.93),
+                    effectiveDurationMs = effectiveDurationMs,
+                    complexityFactor = complexityFactor,
+                    keepSegmentsMs = keepSegmentsMs,
+                    onProgress = onProgress
+                )
+                if (tempCorrected.exists() && tempCorrected.length() > 0L) {
+                    outputFile.delete()
+                    if (!tempCorrected.renameTo(outputFile)) {
+                        tempCorrected.copyTo(outputFile, overwrite = true)
+                        tempCorrected.delete()
+                    }
+                }
+            } finally {
+                if (tempCorrected.exists()) {
+                    runCatching { tempCorrected.delete() }
+                }
             }
         }
 

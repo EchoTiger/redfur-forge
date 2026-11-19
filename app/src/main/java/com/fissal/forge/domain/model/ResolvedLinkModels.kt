@@ -39,7 +39,7 @@ data class PlaylistTrackItem(
         val h = total / 3600L
         val m = (total % 3600L) / 60L
         val s = total % 60L
-        return if (h > 0L) String.format("%d:%02d:%02d", h, m, s) else String.format("%d:%02d", m, s)
+        return if (h > 0L) String.format(Locale.US, "%d:%02d:%02d", h, m, s) else String.format(Locale.US, "%d:%02d", m, s)
     }
 }
 
@@ -133,7 +133,7 @@ data class LinkItemSettings(
                 CompressionTier.TWO_PASS_HEVC -> "HEVC"
                 CompressionTier.COMPATIBLE_H264 -> "H.264"
             }
-            val mbLabel = if (mb % 1.0 == 0.0) mb.toInt().toString() else String.format("%.1f", mb)
+            val mbLabel = if (mb % 1.0 == 0.0) mb.toInt().toString() else String.format(Locale.US, "%.1f", mb)
             parts += if (mode == DownloadMode.AUDIO_ONLY) "≤ ${mbLabel}MB" else "$tierTag ≤ ${mbLabel}MB"
         }
         if (splitByChapters) parts += "Chapters"
@@ -184,6 +184,6 @@ data class ResolvedLinkChipItem(
         val h = total / 3600L
         val m = (total % 3600L) / 60L
         val s = total % 60L
-        return if (h > 0L) String.format("%d:%02d:%02d", h, m, s) else String.format("%d:%02d", m, s)
+        return if (h > 0L) String.format(Locale.US, "%d:%02d:%02d", h, m, s) else String.format(Locale.US, "%d:%02d", m, s)
     }
 }

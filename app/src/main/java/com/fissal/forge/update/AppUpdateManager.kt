@@ -48,6 +48,7 @@ data class AppUpdateState(
     val downloadedBytes: Long = 0L,
     val totalBytes: Long = 0L,
     val readyApkPath: String? = null,
+    val isSha256Verified: Boolean = false,
     val errorMessage: String? = null,
     val autoInstallWhenDownloaded: Boolean = false
 )
@@ -76,7 +77,11 @@ class AppUpdateManager(private val appContext: Context) {
     val updatesDir: File
         get() = File(appContext.cacheDir, "updates").apply { mkdirs() }
 
-    fun checkForUpdates(autoDownload: Boolean, userInitiated: Boolean) {
+    fun checkForUpdates(
+        autoDownload: Boolean,
+        userInitiated: Boolean,
+        autoInstallAfter: Boolean = false
+    ) {
         val currentPhase = _state.value.phase
         if (currentPhase == AppUpdatePhase.DOWNLOADING) return
         if (checkJob?.isActive == true) return
@@ -111,6 +116,7 @@ class AppUpdateManager(private val appContext: Context) {
 
                 val safeName = sanitizeApkFileName(asset.name)
                 val cachedApk = File(updatesDir, safeName)
+                val hasExpectedSha = !release.expectedSha256.isNullOrBlank()
                 val cachedValid = cachedApk.exists() &&
                     (asset.sizeBytes <= 0L || cachedApk.length() == asset.sizeBytes) &&
                     verifySha256(cachedApk, release.expectedSha256)
@@ -124,7 +130,8 @@ class AppUpdateManager(private val appContext: Context) {
                         downloadedBytes = cachedApk.length(),
                         totalBytes = cachedApk.length(),
                         readyApkPath = cachedApk.absolutePath,
-                        autoInstallWhenDownloaded = false
+                        isSha256Verified = hasExpectedSha,
+                        autoInstallWhenDownloaded = autoInstallAfter
                     )
                 } else {
                     _state.value = AppUpdateState(
@@ -135,10 +142,14 @@ class AppUpdateManager(private val appContext: Context) {
                         downloadedBytes = 0L,
                         totalBytes = asset.sizeBytes,
                         readyApkPath = null,
+                        isSha256Verified = false,
                         autoInstallWhenDownloaded = false
                     )
                     if (autoDownload) {
-                        startDownloadInternal(release = release, autoInstallAfter = false)
+                        downloadJob?.cancel()
+                        downloadJob = scope.launch {
+                            startDownloadInternal(release = release, autoInstallAfter = autoInstallAfter)
+                        }
                     }
                 }
             }.onFailure { err ->
@@ -163,7 +174,11 @@ class AppUpdateManager(private val appContext: Context) {
     fun downloadUpdate(autoInstallAfter: Boolean) {
         val current = _state.value
         val release = current.release ?: run {
-            checkForUpdates(autoDownload = true, userInitiated = true)
+            checkForUpdates(
+                autoDownload = true,
+                userInitiated = true,
+                autoInstallAfter = autoInstallAfter
+            )
             return
         }
 
@@ -274,7 +289,8 @@ class AppUpdateManager(private val appContext: Context) {
             }
 
             val expectedSha = release.expectedSha256
-            if (!expectedSha.isNullOrBlank()) {
+            val shaVerified = !expectedSha.isNullOrBlank()
+            if (shaVerified) {
                 val actualSha = digest.digest().joinToString("") { "%02x".format(it) }
                 if (!actualSha.equals(expectedSha, ignoreCase = true)) {
                     throw IOException("APK SHA-256 verification failed")
@@ -295,6 +311,7 @@ class AppUpdateManager(private val appContext: Context) {
                     downloadedBytes = finalFile.length(),
                     totalBytes = finalFile.length(),
                     readyApkPath = finalFile.absolutePath,
+                    isSha256Verified = shaVerified,
                     errorMessage = null
                 )
             }
@@ -431,7 +448,11 @@ class AppUpdateManager(private val appContext: Context) {
     ): HttpURLConnection {
         var currentUrl = urlString
         for (hop in 0 until MAX_REDIRECTS) {
-            val conn = (URL(currentUrl).openConnection() as HttpURLConnection).apply {
+            val parsedUrl = URL(currentUrl)
+            if (!parsedUrl.protocol.equals("https", ignoreCase = true)) {
+                throw IOException("Refusing non-HTTPS update URL: ${parsedUrl.protocol}")
+            }
+            val conn = (parsedUrl.openConnection() as HttpURLConnection).apply {
                 instanceFollowRedirects = false
                 connectTimeout = 10_000
                 readTimeout = 30_000
@@ -449,7 +470,11 @@ class AppUpdateManager(private val appContext: Context) {
                 if (location.isNullOrBlank()) {
                     throw IOException("HTTP $code redirect missing Location header")
                 }
-                currentUrl = URL(URL(currentUrl), location).toString()
+                val nextUrl = URL(parsedUrl, location)
+                if (!nextUrl.protocol.equals("https", ignoreCase = true)) {
+                    throw IOException("Refusing insecure HTTP redirect during update")
+                }
+                currentUrl = nextUrl.toString()
             } else {
                 return conn
             }

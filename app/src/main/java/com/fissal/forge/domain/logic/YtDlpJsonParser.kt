@@ -117,7 +117,9 @@ object YtDlpJsonParser {
             for ((idx, elem) in entriesArr.withIndex()) {
                 val obj = elem as? JsonObject ?: continue
                 val title = obj.str("title") ?: obj.str("fulltitle") ?: "Track ${idx + 1}"
-                // Skip YouTube deleted/private tombstone entries when they carry no playable id/url
+                // Deselect YouTube deleted/private tombstone entries by default while preserving 1-based playlist indices
+                val isTombstone = title.equals("[Deleted video]", ignoreCase = true) ||
+                    title.equals("[Private video]", ignoreCase = true)
                 val id = obj.str("id") ?: "track_${idx + 1}"
                 val rawEntryUrl = obj.str("webpage_url") ?: obj.str("url")
                 val resolvedTrackUrl = normalizeTrackUrl(rawEntryUrl, id, host, obj.str("ie_key"))
@@ -133,7 +135,7 @@ object YtDlpJsonParser {
                     durationSec = dur,
                     trackUrl = resolvedTrackUrl,
                     thumbnailUrl = trackThumb,
-                    selected = true
+                    selected = !isTombstone
                 )
             }
 

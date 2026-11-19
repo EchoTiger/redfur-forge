@@ -62,7 +62,9 @@ import kotlinx.coroutines.flow.SharingStarted
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asSharedFlow
 import kotlinx.coroutines.flow.asStateFlow
+import kotlinx.coroutines.flow.distinctUntilChanged
 import kotlinx.coroutines.flow.first
+import kotlinx.coroutines.flow.map
 import kotlinx.coroutines.flow.stateIn
 import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
@@ -149,6 +151,16 @@ class PipelineOrchestrator(
             jobDao.resetInterruptedJobs()
             sweepOrphanedCacheDirs()
             refreshMetrics()
+        }
+        scope.launch {
+            settingsState
+                .map { it.maxConcurrentDownloads to it.computeSlotsOverride }
+                .distinctUntilChanged()
+                .collect {
+                    networkPool.notifyCapacityChanged(effectiveMaxNetworkSlots())
+                    computePool.notifyCapacityChanged(effectiveMaxComputeSlots())
+                    refreshMetrics()
+                }
         }
     }
 
@@ -460,7 +472,7 @@ class PipelineOrchestrator(
                 embedThumbnail = globalSettings.embedDownloadThumbnail && effSettings.embedMetadata,
                 sponsorBlock = effSettings.effectiveSponsorBlockCategories.isNotEmpty(),
                 useAria2c = globalSettings.useAria2c,
-                sponsorBlockCategories = effSettings.sponsorBlockCategories,
+                sponsorBlockCategories = effSettings.effectiveSponsorBlockCategories,
                 siteConnectionId = effSettings.siteConnectionId?.trim()?.takeIf { it.isNotEmpty() },
                 splitByChapters = true
             ),
@@ -664,6 +676,7 @@ class PipelineOrchestrator(
                         id = UUID.randomUUID().toString(),
                         title = resolvedTitle,
                         sourceLabel = "$host • ${spec.summaryLabel()}",
+                        pipelineSpecJson = json.encodeToString(spec),
                         status = JobStatus.QUEUED.name,
                         progress = 0f,
                         statusText = "Queued • ${spec.summaryLabel()}",
@@ -1559,16 +1572,22 @@ class PipelineOrchestrator(
         workDir: File
     ) {
         val dlSpec = spec.download ?: return
+        val effectiveDlSpec = if (spec.delivery.stripMetadata) {
+            dlSpec.copy(embedMetadata = false, embedThumbnail = false)
+        } else {
+            dlSpec
+        }
+        val needsPostStage = spec.hasTransformStage || spec.delivery.stripMetadata
         enforceScratchStoragePreflight(
             estimatedInputBytes = entity.inputBytes.coerceAtLeast(0L),
             chapterCount = 1,
-            hasTransformStage = spec.hasTransformStage,
+            hasTransformStage = needsPostStage,
             twoPass = spec.compress?.twoPass == true
         )
         val maxNet = { effectiveMaxNetworkSlots() }
 
         val downloadedFiles = networkPool.withSlots(cost = 1, capacityProvider = maxNet, onPoolChange = { refreshMetrics() }) {
-            val initMsg = if (spec.hasTransformStage) "Step 1/2 • Connecting & resolving stream..." else "Connecting & resolving stream..."
+            val initMsg = if (needsPostStage) "Step 1/2 • Connecting & resolving stream..." else "Connecting & resolving stream..."
             jobDao.updateProgress(entity.id, JobStatus.DOWNLOADING.name, initMsg, -1f, JobLane.NETWORK.name)
             refreshMetrics()
             withConflatedProgressPump(
@@ -1576,15 +1595,15 @@ class PipelineOrchestrator(
                     if (activeCoroutines.containsKey(entity.id)) {
                         val mappedPct = when {
                             pct < 0f -> -1f
-                            spec.hasTransformStage -> (pct * 0.52f).coerceIn(1f, 52f)
+                            needsPostStage -> (pct * 0.52f).coerceIn(1f, 52f)
                             else -> pct.coerceIn(1f, 99.5f)
                         }
-                        val statusLabel = if (spec.hasTransformStage) "Step 1/2 • $msg" else msg
+                        val statusLabel = if (needsPostStage) "Step 1/2 • $msg" else msg
                         jobDao.updateProgress(entity.id, JobStatus.DOWNLOADING.name, statusLabel, mappedPct, JobLane.NETWORK.name)
                     }
                 }
             ) { emitProgress ->
-                ytDlpEngine.download(entity.id, dlSpec, File(workDir, "dl"), onProgress = emitProgress)
+                ytDlpEngine.download(entity.id, effectiveDlSpec, File(workDir, "dl"), onProgress = emitProgress)
             }
         }
 
@@ -1598,22 +1617,40 @@ class PipelineOrchestrator(
             val finalFile: File
             val probe = probeEngine.probeLocalFile(downloaded, dlSpec.url)
 
-            if (spec.hasTransformStage) {
+            if (needsPostStage) {
+                val transformSpec = if (!spec.hasTransformStage && spec.delivery.stripMetadata &&
+                    (probe.mediaKind == MediaKind.VIDEO || probe.mediaKind == MediaKind.AUDIO)
+                ) {
+                    spec.copy(
+                        convert = ConvertSpec(
+                            targetExtension = probe.extension,
+                            videoCodec = VideoCodecChoice.COPY,
+                            audioCodec = AudioCodecChoice.COPY
+                        )
+                    )
+                } else {
+                    spec
+                }
                 enforceScratchStoragePreflight(
                     estimatedInputBytes = downloaded.length(),
                     chapterCount = 1,
                     hasTransformStage = true,
-                    twoPass = spec.compress?.twoPass == true,
+                    twoPass = transformSpec.compress?.twoPass == true,
                     alreadyStagedOnDisk = true
                 )
-                val weight = computeSlotWeight(probe.mediaKind)
+                val weight = if (!spec.hasTransformStage && spec.delivery.stripMetadata) 1 else computeSlotWeight(probe.mediaKind)
                 val maxCompute = { effectiveMaxComputeSlots() }
                 finalFile = computePool.withSlots(cost = weight, capacityProvider = maxCompute, onPoolChange = { refreshMetrics() }) {
                     val baseProgress = 54f
+                    val step2Label = if (!spec.hasTransformStage && spec.delivery.stripMetadata) {
+                        "Step 2/2 • Stripping metadata from ${downloaded.name}..."
+                    } else {
+                        "Step 2/2 • Forging ${downloaded.name}..."
+                    }
                     jobDao.updateProgress(
                         entity.id,
                         JobStatus.PROCESSING.name,
-                        "Step 2/2 • Forging ${downloaded.name}...",
+                        step2Label,
                         baseProgress,
                         JobLane.COMPUTE.name
                     )
@@ -1636,7 +1673,7 @@ class PipelineOrchestrator(
                             sourceUri = Uri.fromFile(downloaded),
                             stagedInput = downloaded,
                             probe = probe,
-                            spec = spec,
+                            spec = transformSpec,
                             workDir = workDir,
                             onProgress = emitProgress
                         )
@@ -1816,12 +1853,17 @@ class PipelineOrchestrator(
 
     private fun resolveTargetExtension(probe: MediaProbeResult, spec: PipelineSpec): String {
         val requested = spec.convert?.targetExtension?.lowercase(Locale.US)?.trim()
-        if (!requested.isNullOrBlank()) return requested
+        if (!requested.isNullOrBlank()) {
+            if (probe.mediaKind == MediaKind.IMAGE || probe.mediaKind == MediaKind.CAMERA_RAW) {
+                return if (requested in setOf("jpg", "jpeg", "png", "webp")) requested else "jpg"
+            }
+            return requested
+        }
         return when (probe.mediaKind) {
             MediaKind.CAMERA_RAW -> "jpg"
-            MediaKind.IMAGE -> if (probe.extension in setOf("jpg", "jpeg", "png", "webp")) probe.extension else "jpg"
-            MediaKind.VIDEO -> if (probe.extension in setOf("mp4", "mkv", "webm", "mov")) probe.extension else "mp4"
-            MediaKind.AUDIO -> if (probe.extension in setOf("mp3", "m4a", "opus", "flac", "wav")) probe.extension else "m4a"
+            MediaKind.IMAGE -> if (probe.extension.lowercase(Locale.US) in setOf("jpg", "jpeg", "png", "webp")) probe.extension.lowercase(Locale.US) else "jpg"
+            MediaKind.VIDEO -> if (probe.extension.lowercase(Locale.US) in setOf("mp4", "mkv", "webm", "mov")) probe.extension.lowercase(Locale.US) else "mp4"
+            MediaKind.AUDIO -> if (probe.extension.lowercase(Locale.US) in setOf("mp3", "m4a", "opus", "flac", "wav")) probe.extension.lowercase(Locale.US) else "m4a"
             else -> probe.extension.ifBlank { "bin" }
         }
     }

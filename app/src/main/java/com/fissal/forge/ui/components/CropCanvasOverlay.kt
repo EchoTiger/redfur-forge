@@ -100,9 +100,12 @@ fun CropCanvasOverlay(
         val offsetX = (boxW - renderW) / 2f
         val offsetY = (boxH - renderH) / 2f
 
-        if (bitmap != null && !bitmap.isRecycled) {
+        val imageBitmap = remember(bitmap) {
+            bitmap?.takeIf { !it.isRecycled }?.asImageBitmap()
+        }
+        if (imageBitmap != null) {
             Image(
-                bitmap = bitmap.asImageBitmap(),
+                bitmap = imageBitmap,
                 contentDescription = "Crop preview",
                 contentScale = ContentScale.Fit,
                 modifier = Modifier.fillMaxSize()
@@ -140,6 +143,7 @@ fun CropCanvasOverlay(
                         onDragEnd = { dragMode = DragMode.NONE },
                         onDragCancel = { dragMode = DragMode.NONE },
                         onDrag = { change, dragAmount ->
+                            if (dragMode == DragMode.NONE) return@detectDragGestures
                             change.consume()
                             val dx = dragAmount.x / renderW
                             val dy = dragAmount.y / renderH

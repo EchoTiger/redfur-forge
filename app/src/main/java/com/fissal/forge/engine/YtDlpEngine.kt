@@ -123,8 +123,8 @@ class YtDlpEngine(
                     addOption("--yes-playlist")
                 }
 
-                // Avoid external aria2c when authenticated cookies are active so yt-dlp handles headers/redirects natively.
-                if (spec.useAria2c && cookieFile == null) {
+                // Avoid external aria2c when unavailable or when authenticated cookies are active so yt-dlp handles headers/redirects natively.
+                if (spec.useAria2c && cookieFile == null && binaryManager.isAria2cAvailable) {
                     addOption("--downloader", "libaria2c.so")
                     addOption("--external-downloader-args", "aria2c:-x 8 -k 1M --summary-interval=1")
                 }
@@ -158,7 +158,9 @@ class YtDlpEngine(
                 if (spec.embedMetadata) {
                     addOption("--embed-metadata")
                 }
-                if (spec.embedThumbnail && spec.mode != DownloadMode.VIDEO_BEST_MKV) {
+                val audioFormatSupportsThumbnail = spec.mode != DownloadMode.AUDIO_ONLY ||
+                    !spec.audioFormat.equals("wav", ignoreCase = true)
+                if (spec.embedThumbnail && spec.mode != DownloadMode.VIDEO_BEST_MKV && audioFormatSupportsThumbnail) {
                     addOption("--embed-thumbnail")
                 }
                 buildSponsorBlockRemoveValue(spec)?.let { removeCategories ->

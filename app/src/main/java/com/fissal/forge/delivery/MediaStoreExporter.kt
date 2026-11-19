@@ -1,12 +1,15 @@
 package com.fissal.forge.delivery
 
+import android.Manifest
 import android.content.ContentValues
 import android.content.Context
+import android.content.pm.PackageManager
 import android.media.MediaScannerConnection
 import android.net.Uri
 import android.os.Build
 import android.os.Environment
 import android.provider.MediaStore
+import androidx.core.content.ContextCompat
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
 import java.io.File
@@ -66,6 +69,13 @@ class MediaStoreExporter(private val appContext: Context) {
                 throw t
             }
         } else {
+            val hasLegacyWrite = ContextCompat.checkSelfPermission(
+                appContext,
+                Manifest.permission.WRITE_EXTERNAL_STORAGE
+            ) == PackageManager.PERMISSION_GRANTED
+            if (!hasLegacyWrite) {
+                throw IOException("Storage permission is required on Android 8–9 to save files to shared folders")
+            }
             @Suppress("DEPRECATION")
             val rootDir = when {
                 mimeType.startsWith("video/") -> Environment.getExternalStoragePublicDirectory(Environment.DIRECTORY_MOVIES)
@@ -74,7 +84,7 @@ class MediaStoreExporter(private val appContext: Context) {
                 else -> Environment.getExternalStoragePublicDirectory(Environment.DIRECTORY_DOWNLOADS)
             }
             val forgeDir = File(rootDir, "RedfurForge").apply { if (!exists()) mkdirs() }
-            val destFile = File(forgeDir, desiredName)
+            val destFile = resolveUniqueFile(forgeDir, desiredName)
             FileInputStream(sourceFile).use { input ->
                 FileOutputStream(destFile).use { out ->
                     input.copyTo(out, bufferSize = 256 * 1024)
@@ -82,8 +92,22 @@ class MediaStoreExporter(private val appContext: Context) {
                 }
             }
             MediaScannerConnection.scanFile(appContext, arrayOf(destFile.absolutePath), arrayOf(mimeType), null)
-            SavedOutput(Uri.fromFile(destFile), mimeType, desiredName)
+            SavedOutput(Uri.fromFile(destFile), mimeType, destFile.name)
         }
+    }
+
+    private fun resolveUniqueFile(dir: File, desiredName: String): File {
+        var candidate = File(dir, desiredName)
+        if (!candidate.exists()) return candidate
+        val dot = desiredName.lastIndexOf('.')
+        val base = if (dot > 0) desiredName.substring(0, dot) else desiredName
+        val ext = if (dot > 0) desiredName.substring(dot) else ""
+        var counter = 1
+        while (candidate.exists() && counter < 10_000) {
+            candidate = File(dir, "${base}_$counter$ext")
+            counter++
+        }
+        return candidate
     }
 
     fun extensionToMime(ext: String): String = when (ext.lowercase(Locale.US)) {

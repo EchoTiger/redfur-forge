@@ -1,5 +1,6 @@
 package com.fissal.forge.domain.model
 
+import java.util.Locale
 import kotlinx.serialization.Serializable
 import kotlinx.serialization.encodeToString
 import kotlinx.serialization.json.Json
@@ -206,7 +207,7 @@ data class PipelineSpec(
         if (compress != null) {
             parts += if (compress.mode == CompressMode.TARGET_BYTES && compress.targetBytes != null) {
                 val mb = compress.targetBytes / (1024.0 * 1024.0)
-                if (mb >= 1.0) String.format("≤ %.1f MB", mb) else "${compress.targetBytes / 1024} KB"
+                if (mb >= 1.0) String.format(Locale.US, "≤ %.1f MB", mb) else "${compress.targetBytes / 1024} KB"
             } else {
                 "Compress Q${compress.videoCrf}"
             }
