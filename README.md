@@ -1,4 +1,4 @@
-# Redfur Forge (`com.fissal.forge`) — v2.1.0
+# Redfur Forge (`com.fissal.forge`) — v2.1.1
 
 Native Android Kotlin + Jetpack Compose sovereign media utility wrapping **yt-dlp**, **FFmpeg / FFprobe**, **aria2c**, and **LibRaw** (`AndroidLibRaw`) with dual-engine **Arc-Relay** intake and **Molten Forge** local transformation.
 

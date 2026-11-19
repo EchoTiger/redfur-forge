@@ -136,9 +136,6 @@ abstract class SyncLatestYtDlpTask : DefaultTask() {
             readTimeout = 60000
             instanceFollowRedirects = true
             setRequestProperty("User-Agent", "redfur-forge-gradle")
-            githubToken()?.let { token ->
-                setRequestProperty("Authorization", "Bearer $token")
-            }
         }
         try {
             val code = conn.responseCode
@@ -212,8 +209,8 @@ android {
         applicationId = "com.fissal.forge"
         minSdk = 26
         targetSdk = 35
-        versionCode = 20100
-        versionName = "2.1.0"
+        versionCode = 20101
+        versionName = "2.1.1"
 
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
     }
@@ -231,8 +228,8 @@ android {
 
     buildTypes {
         release {
-            isMinifyEnabled = false
-            isShrinkResources = false
+            isMinifyEnabled = true
+            isShrinkResources = true
             signingConfig = if (keystorePropsFile.exists()) {
                 signingConfigs.getByName("release")
             } else {
@@ -311,21 +308,18 @@ dependencies {
     implementation("androidx.lifecycle:lifecycle-runtime-ktx:2.8.7")
     implementation("androidx.lifecycle:lifecycle-runtime-compose:2.8.7")
     implementation("androidx.lifecycle:lifecycle-viewmodel-compose:2.8.7")
-    implementation("androidx.navigation:navigation-compose:2.8.3")
 
     implementation("androidx.room:room-runtime:2.6.1")
     implementation("androidx.room:room-ktx:2.6.1")
     ksp("androidx.room:room-compiler:2.6.1")
 
     implementation("androidx.datastore:datastore-preferences:1.1.1")
-    implementation("androidx.work:work-runtime-ktx:2.9.1")
     implementation("androidx.exifinterface:exifinterface:1.3.7")
 
     implementation("org.jetbrains.kotlinx:kotlinx-serialization-json:1.7.3")
     implementation("org.jetbrains.kotlinx:kotlinx-coroutines-android:1.9.0")
 
     implementation("io.coil-kt:coil-compose:2.7.0")
-    implementation("io.coil-kt:coil-video:2.7.0")
 
     implementation("io.github.junkfood02.youtubedl-android:library:0.18.1")
     implementation("io.github.junkfood02.youtubedl-android:ffmpeg:0.18.1")

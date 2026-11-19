@@ -70,13 +70,32 @@ jobs:
           ARM_SHA=$(sha256sum "${{ runner.temp }}/release-assets/redfur-forge-${TAG}-arm64-v8a.apk" | awk '{print $1}')
           UNI_SHA=$(sha256sum "${{ runner.temp }}/release-assets/redfur-forge-${TAG}-universal.apk" | awk '{print $1}')
           NOTES_FILE="${{ runner.temp }}/release-assets/notes.md"
-          printf "## Redfur Forge %s\n\n### SHA-256 Checksums\n- \`redfur-forge-%s-arm64-v8a.apk\`: \`%s\`\n- \`redfur-forge-%s-universal.apk\`: \`%s\`\n" \
-            "$TAG" "$TAG" "$ARM_SHA" "$TAG" "$UNI_SHA" > "$NOTES_FILE"
+          CHECKSUM_BLOCK=$(printf "### SHA-256 Checksums\n- \`redfur-forge-%s-arm64-v8a.apk\`: \`%s\`\n- \`redfur-forge-%s-universal.apk\`: \`%s\`\n" \
+            "$TAG" "$ARM_SHA" "$TAG" "$UNI_SHA")
+          printf "## Redfur Forge %s\n\n%s\n" "$TAG" "$CHECKSUM_BLOCK" > "$NOTES_FILE"
           if gh release view "$TAG" >/dev/null 2>&1; then
             gh release upload "$TAG" \
               "${{ runner.temp }}/release-assets/redfur-forge-${TAG}-arm64-v8a.apk" \
               "${{ runner.temp }}/release-assets/redfur-forge-${TAG}-universal.apk" \
               --clobber
+            EXISTING_BODY=$(gh release view "$TAG" --json body -q .body || true)
+            MERGED_NOTES="${{ runner.temp }}/release-assets/merged_notes.md"
+            EXISTING_BODY="$EXISTING_BODY" CHECKSUM_BLOCK="$CHECKSUM_BLOCK" python3 - "$MERGED_NOTES" <<'PY'
+          import os, re, sys
+
+          existing = os.environ.get("EXISTING_BODY", "").replace("\r\n", "\n").strip()
+          block = os.environ.get("CHECKSUM_BLOCK", "").strip()
+          # Replace any existing SHA-256 Checksums section while preserving all other release notes
+          stripped = re.sub(
+              r"(?ms)^###\s+SHA-256 Checksums\b.*?(?=^##+\s|\Z)",
+              "",
+              existing,
+          ).strip()
+          merged = f"{stripped}\n\n{block}\n" if stripped else f"{block}\n"
+          with open(sys.argv[1], "w", encoding="utf-8") as fh:
+              fh.write(merged)
+          PY
+            gh release edit "$TAG" --notes-file "$MERGED_NOTES"
           else
             gh release create "$TAG" \
               "${{ runner.temp }}/release-assets/redfur-forge-${TAG}-arm64-v8a.apk" \
